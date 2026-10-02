@@ -118,6 +118,13 @@ function passwordLogin(hostserver, user, pass, callback) {
             var token = (status >= 200 && status < 300 && response.access_token)
                 ? response.access_token : null;
             authToken = token;
+
+            if (token && response.user_id) {
+                var settings = getSettings() || {};
+                settings['user_id'] = response.user_id;
+                saveSettings(settings);
+            }
+
             callback(token);
         });
 }
@@ -159,8 +166,16 @@ function refreshAccessToken(settings, hostserver, callback) {
 function validateToken(settings, hostserver, callback) {
     httpRequest("GET", hostserver + "/_matrix/client/v3/account/whoami",
         { "Authorization": "Bearer " + settings['access_token'] }, null, 30000,
-        function (status) {
+        function (status, text) {
             if (status >= 200 && status < 300) {
+                try {
+                    var response = JSON.parse(text);
+                    if (response.user_id && settings['user_id'] !== response.user_id) {
+                        settings['user_id'] = response.user_id;
+                        saveSettings(settings);
+                    }
+                } catch (err) {
+                }
                 callback(settings['access_token']);
             } else if (status === 401) {
                 refreshAccessToken(settings, hostserver, callback);
@@ -224,15 +239,88 @@ var SYNC_FILTER = {
     account_data: { not_types: ["*"] }
 };
 
-function getSyncData(token, callback) {
+// Register the filter server-side so the sync URL stays short. The phone's
+// PKJS does not reliably send long query strings.
+function registerFilter(token, userId, callback) {
     var hostserver = getHostServer();
     if (!hostserver) {
         callback(null);
         return;
     }
 
-    var url = hostserver + "/_matrix/client/v3/sync?timeout=30000&filter=" +
-        encodeURIComponent(JSON.stringify(SYNC_FILTER));
+    var url = hostserver + "/_matrix/client/v3/user/" +
+        encodeURIComponent(userId) + "/filter";
+
+    httpRequest("POST", url,
+        {
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json"
+        },
+        JSON.stringify(SYNC_FILTER), 30000,
+        function (status, text) {
+            if (status >= 200 && status < 300) {
+                try {
+                    var response = JSON.parse(text);
+                    if (response.filter_id) {
+                        console.log("Filter registered:", response.filter_id);
+                        callback(response.filter_id);
+                        return;
+                    }
+                } catch (err) {
+                }
+            }
+            console.log("Filter registration failed:", status);
+            callback(null);
+        });
+}
+
+function ensureFilter(token, callback) {
+    var settings = getSettings() || {};
+    var userId = settings['user_id'];
+
+    if (userId) {
+        registerFilter(token, userId, callback);
+        return;
+    }
+
+    var hostserver = getHostServer();
+    if (!hostserver) {
+        callback(null);
+        return;
+    }
+
+    httpRequest("GET", hostserver + "/_matrix/client/v3/account/whoami",
+        { "Authorization": "Bearer " + token }, null, 30000,
+        function (status, text) {
+            if (status >= 200 && status < 300) {
+                try {
+                    var response = JSON.parse(text);
+                    if (response.user_id) {
+                        settings['user_id'] = response.user_id;
+                        saveSettings(settings);
+                        registerFilter(token, response.user_id, callback);
+                        return;
+                    }
+                } catch (err) {
+                }
+            }
+            callback(null);
+        });
+}
+
+function getSyncData(token, filterId, callback) {
+    var hostserver = getHostServer();
+    if (!hostserver) {
+        callback(null);
+        return;
+    }
+
+    var url = hostserver + "/_matrix/client/v3/sync?timeout=30000";
+    if (filterId) {
+        url += "&filter=" + encodeURIComponent(filterId);
+    } else {
+        url += "&filter=" + encodeURIComponent(JSON.stringify(SYNC_FILTER));
+    }
 
     httpRequest("GET", url, { "Authorization": "Bearer " + token }, null, 120000,
         function (status, text) {
@@ -550,19 +638,21 @@ function init() {
             sendRoomList();
         }
 
-        syncWithRetry(token, 0, !!cached);
+        ensureFilter(token, function(filterId) {
+            syncWithRetry(token, filterId, 0, !!cached);
+        });
     });
 }
 
-function syncWithRetry(token, attempt, hasCache) {
-    getSyncData(token, function(data) {
+function syncWithRetry(token, filterId, attempt, hasCache) {
+    getSyncData(token, filterId, function(data) {
         if (data && Object.keys(data).length > 0) {
             sendRoomList();
-        } else if (attempt < 1) {
+        } else if (attempt < 2) {
             console.log('Sync failed, retrying');
             setTimeout(function() {
-                syncWithRetry(token, attempt + 1, hasCache);
-            }, 2000);
+                syncWithRetry(token, filterId, attempt + 1, hasCache);
+            }, 2000 * (attempt + 1));
         } else if (hasCache) {
             console.log('Sync failed, keeping cached rooms');
         } else {
