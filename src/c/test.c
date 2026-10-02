@@ -35,6 +35,16 @@ int messagesCounter = 1;
 int progress = 0;
 
 static bool loadingDismissed = false;
+static bool roomsHasMore = false;
+static bool hasCache = false;
+static bool freshAnimated = false;
+static GRect rooms_anim_from;
+static GRect rooms_anim_to;
+
+static void update_loading_text(void);
+static void request_more_rooms(void);
+static void request_cached_rooms(void);
+static void animate_rooms_in(void);
 
 
 // Scroll Layer Handler
@@ -259,6 +269,11 @@ static uint16_t messages_get_num_rows_callback(MenuLayer *menu_layer, uint16_t s
 // Rooms Select Handlers
 
 static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (cell_index->row >= roomsCounter) {
+    request_more_rooms();
+    return;
+  }
+
   messagesCounter = 0;
 
   memset(messages, 0, sizeof(messages));
@@ -275,11 +290,16 @@ static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, 
 }
 
 static void rooms_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  if (cell_index->row >= roomsCounter) {
+    menu_cell_basic_draw(ctx, cell_layer, "Load more", NULL, NULL);
+    return;
+  }
+
   menu_cell_basic_draw(ctx, cell_layer, rooms[cell_index->row], NULL, NULL);
 }
 
 static uint16_t rooms_get_num_rows_callback(MenuLayer *menu_layer, uint16_t section_index, void *context) {
-  return roomsCounter;
+  return roomsCounter + (roomsHasMore ? 1 : 0);
 }
 
 
@@ -295,14 +315,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
   if (strcmp(type, "ROOMS") == 0) {
 
-    if (roomsCounter >= 32) return;
-
-    if (!loadingDismissed) {
-      loadingDismissed = true;
-      if (loadingWindow) {
-        window_stack_remove(loadingWindow, true);
-      }
-    }
+    if (roomsCounter >= 100) return;
 
     Tuple *room_tuple = dict_find(iterator, MESSAGE_KEY_ROOM_NAME);
     if (!room_tuple) return;
@@ -317,6 +330,33 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       menu_layer_reload_data(roomsLayer);
     }
 
+  } else if (strcmp(type, "ROOMS_DONE") == 0) {
+    Tuple *more_tuple = dict_find(iterator, MESSAGE_KEY_HAS_MORE);
+    roomsHasMore = more_tuple && more_tuple->value->int32 != 0;
+
+    Tuple *cache_tuple = dict_find(iterator, MESSAGE_KEY_FROM_CACHE);
+    bool fromCache = cache_tuple && cache_tuple->value->int32 != 0;
+
+    if (!loadingDismissed) {
+      loadingDismissed = true;
+      if (loadingWindow) {
+        window_stack_remove(loadingWindow, true);
+      }
+    }
+
+    if (!fromCache && !freshAnimated) {
+      freshAnimated = true;
+      animate_rooms_in();
+    }
+
+    if (roomsLayer) {
+      menu_layer_reload_data(roomsLayer);
+    }
+  } else if (strcmp(type, "CACHE_STATE") == 0) {
+    Tuple *cache_tuple = dict_find(iterator, MESSAGE_KEY_HAS_CACHE);
+    hasCache = cache_tuple && cache_tuple->value->int32 != 0;
+
+    update_loading_text();
   } else if (strcmp(type, "MESSAGE") == 0) {
     if (messagesCounter >= 12) return;
 
@@ -342,6 +382,8 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
   } else if (strcmp(type, "CLEAR_ROOMS") == 0) {
     roomsCounter = 0;
+    roomsHasMore = false;
+    freshAnimated = false;
     memset(rooms, 0, sizeof(rooms));
 
     if (roomsLayer) {
@@ -366,6 +408,66 @@ static void outbox_sent_callback(DictionaryIterator *iterator, void *context) {
 }
 
 
+
+
+// Loading Window Helpers
+
+static void update_loading_text(void) {
+  if (!loadingTextLayer) return;
+
+  if (hasCache) {
+    text_layer_set_text(loadingTextLayer, "Loading...\nSelect For Cached Messages");
+  } else {
+    text_layer_set_text(loadingTextLayer, "Loading...");
+  }
+}
+
+static void request_more_rooms(void) {
+  DictionaryIterator *iter;
+  AppMessageResult res = app_message_outbox_begin(&iter);
+  if (res != APP_MSG_OK) return;
+
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "LOAD_MORE");
+
+  app_message_outbox_send();
+}
+
+static void request_cached_rooms(void) {
+  DictionaryIterator *iter;
+  AppMessageResult res = app_message_outbox_begin(&iter);
+  if (res != APP_MSG_OK) return;
+
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SHOW_CACHE");
+
+  app_message_outbox_send();
+}
+
+static void loading_select_click(ClickRecognizerRef recognizer, void *context) {
+  request_cached_rooms();
+}
+
+static void loading_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, loading_select_click);
+}
+
+
+// Rooms Window Helpers
+
+static void animate_rooms_in(void) {
+  if (!roomsLayer) return;
+
+  Layer *layer = menu_layer_get_layer(roomsLayer);
+
+  rooms_anim_to = reserve_bar_space(window_get_root_layer(roomsWindow));
+  rooms_anim_from = rooms_anim_to;
+  rooms_anim_from.origin.y = rooms_anim_to.origin.y + rooms_anim_to.size.h;
+
+  PropertyAnimation *animation =
+      property_animation_create_layer_frame(layer, &rooms_anim_from, &rooms_anim_to);
+  animation_set_duration((Animation *)animation, 300);
+  animation_set_curve((Animation *)animation, AnimationCurveEaseOut);
+  animation_schedule((Animation *)animation);
+}
 
 
 // Rooms Window Handlers
@@ -439,8 +541,11 @@ static void loading_window_load(Window *window) {
   text_layer_set_text_alignment(loadingTextLayer, GTextAlignmentCenter);
   text_layer_set_text_color(loadingTextLayer, GColorBlack);
   text_layer_set_font(loadingTextLayer, fonts_get_system_font(FONT_KEY_GOTHIC_28));
-  text_layer_set_text(loadingTextLayer, "Loading...");
   text_layer_set_overflow_mode(loadingTextLayer, GTextOverflowModeWordWrap);
+
+  update_loading_text();
+
+  window_set_click_config_provider(window, loading_click_config_provider);
 
   bar_load(window);
 

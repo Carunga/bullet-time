@@ -27,7 +27,10 @@
       "SENDER",
       "TEXT",
       "ROOM_NAME",
-      "TYPE"
+      "TYPE",
+      "HAS_MORE",
+      "FROM_CACHE",
+      "HAS_CACHE"
     ],
     "resources": {
       "media": [{

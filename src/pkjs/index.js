@@ -378,6 +378,7 @@ function getSyncData(token, filterId, callback) {
 
             saveRoomCache(ordered);
             syncData = roomsToSyncData(ordered);
+            setRoomOrder(ordered, 'fresh');
             console.log("Rooms loaded:", ordered.length);
 
             callback(syncData);
@@ -416,29 +417,30 @@ function matrixSendMessage(message) {
 
 // Send functions
 
-// The watch only keeps 32 rooms; sending more is wasted traffic that can
-// overwhelm the AppMessage channel.
-var MAX_ROOMS = 32;
-var roomSendInProgress = false;
-var pendingRoomList = false;
-var lastRoomSignature = null;
+// The watch shows rooms 10 at a time (max 100). Paging keeps AppMessage
+// traffic small and lets the watch ask for more.
+var MAX_ROOMS = 100;
+var PAGE_SIZE = 10;
+var roomOrder = [];
+var roomPageOffset = 0;
+var roomSource = 'fresh';
+var pageSendInProgress = false;
+var pendingPage = null;
 
-function roomListSignature() {
-    return Object.keys(syncData).slice(0, MAX_ROOMS).join("\n");
+function setRoomOrder(rooms, source) {
+    roomOrder = rooms.slice(0, MAX_ROOMS);
+    roomPageOffset = 0;
+    roomSource = source;
 }
 
-function sendRooms(i, done) {
-    var ids = Object.keys(syncData);
-
-    if (i >= ids.length || i >= MAX_ROOMS) {
+function sendRoomsSequential(page, i, done) {
+    if (i >= page.length) {
         if (done) done();
         return;
     }
 
-    var id = ids[i];
-
     Pebble.sendAppMessage(
-        {'TYPE': 'ROOMS', 'ROOM_NAME': id},
+        {'TYPE': 'ROOMS', 'ROOM_NAME': page[i].name},
         function() {
         },
         function(e) {
@@ -446,46 +448,83 @@ function sendRooms(i, done) {
         }
     );
 
-    setTimeout( function() {
-            sendRooms(i+1, done);
+    setTimeout(function() {
+        sendRoomsSequential(page, i + 1, done);
     }, 100);
 }
 
-function sendRoomList() {
-    var signature = roomListSignature();
-
-    if (signature === lastRoomSignature) {
-        console.log('Room list unchanged, not resending');
+function sendRoomPage(clear) {
+    if (pageSendInProgress) {
+        pendingPage = { clear: clear };
         return;
     }
 
-    if (roomSendInProgress) {
-        pendingRoomList = true;
-        return;
-    }
+    pageSendInProgress = true;
 
-    roomSendInProgress = true;
+    var start = roomPageOffset;
+    var page = roomOrder.slice(start, start + PAGE_SIZE);
+    roomPageOffset = start + page.length;
+
+    var fromCache = roomSource === 'cache' ? 1 : 0;
+    var hasMore = roomPageOffset < roomOrder.length ? 1 : 0;
 
     function finish() {
-        roomSendInProgress = false;
-        lastRoomSignature = signature;
+        pageSendInProgress = false;
 
-        if (pendingRoomList) {
-            pendingRoomList = false;
-            sendRoomList();
+        if (pendingPage) {
+            var pending = pendingPage;
+            pendingPage = null;
+            sendRoomPage(pending.clear);
         }
     }
 
-    Pebble.sendAppMessage(
-        {'TYPE': 'CLEAR_ROOMS'},
-        function() {
-            sendRooms(0, finish);
-        },
-        function(e) {
-            console.log('Issue clearing rooms: ', e);
-            sendRooms(0, finish);
-        }
-    );
+    function afterClear() {
+        sendRoomsSequential(page, 0, function() {
+            Pebble.sendAppMessage(
+                {'TYPE': 'ROOMS_DONE', 'HAS_MORE': hasMore, 'FROM_CACHE': fromCache},
+                function() {
+                    finish();
+                },
+                function(e) {
+                    console.log('Issue sending page end: ', e);
+                    finish();
+                }
+            );
+        });
+    }
+
+    if (clear) {
+        Pebble.sendAppMessage(
+            {'TYPE': 'CLEAR_ROOMS'},
+            function() {
+                afterClear();
+            },
+            function(e) {
+                console.log('Issue clearing rooms: ', e);
+                afterClear();
+            }
+        );
+    } else {
+        afterClear();
+    }
+}
+
+function showCachedRooms() {
+    var cached = loadRoomCache();
+    if (!cached) {
+        console.log('No cached rooms to show');
+        return;
+    }
+
+    console.log('Showing', cached.length, 'cached rooms');
+    syncData = roomsToSyncData(cached);
+    setRoomOrder(cached, 'cache');
+    sendRoomPage(true);
+}
+
+function loadMoreRooms() {
+    if (roomPageOffset >= roomOrder.length) return;
+    sendRoomPage(false);
 }
 
 function sendMessage(messages, i) {
@@ -658,6 +697,18 @@ function sendNotConf() {
     );
 }
 
+function sendCacheState() {
+    var cached = loadRoomCache();
+
+    Pebble.sendAppMessage(
+        {'TYPE': 'CACHE_STATE', 'HAS_CACHE': cached ? 1 : 0},
+        function() {},
+        function(e) {
+            console.log('Issue sending cache state: ', e);
+        }
+    );
+}
+
 function init() {
     login(function(token) {
         if (!token) {
@@ -668,33 +719,25 @@ function init() {
 
         console.log('Logged in');
 
-        var cached = loadRoomCache();
-        if (cached) {
-            console.log('Rendering', cached.length, 'cached rooms');
-            syncData = roomsToSyncData(cached);
-            sendRoomList();
-        }
+        sendCacheState();
 
         ensureFilter(token, function(filterId) {
-            syncWithRetry(token, filterId, 0, !!cached);
+            syncWithRetry(token, filterId, 0);
         });
     });
 }
 
-function syncWithRetry(token, filterId, attempt, hasCache) {
+function syncWithRetry(token, filterId, attempt) {
     getSyncData(token, filterId, function(data) {
         if (data && Object.keys(data).length > 0) {
-            sendRoomList();
+            sendRoomPage(true);
         } else if (attempt < 2) {
             console.log('Sync failed, retrying');
             setTimeout(function() {
-                syncWithRetry(token, filterId, attempt + 1, hasCache);
+                syncWithRetry(token, filterId, attempt + 1);
             }, 2000 * (attempt + 1));
-        } else if (hasCache) {
-            console.log('Sync failed, keeping cached rooms');
         } else {
             console.log('Sync failed after retries');
-            sendNotConf();
         }
     });
 }
@@ -710,6 +753,10 @@ Pebble.addEventListener('appmessage', function(e) {
     } else if (type == 'SEND_MESSAGE') {
         var text = e.payload.TEXT;
         matrixSendMessage(text);
+    } else if (type == 'LOAD_MORE') {
+        loadMoreRooms();
+    } else if (type == 'SHOW_CACHE') {
+        showCachedRooms();
     }
 
 });        
