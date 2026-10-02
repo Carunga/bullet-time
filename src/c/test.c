@@ -46,6 +46,21 @@ static void request_more_rooms(void);
 static void request_cached_rooms(void);
 static void animate_rooms_in(void);
 
+static PreferredContentSize s_content_size;
+
+static GFont content_font(bool bold) {
+  switch (s_content_size) {
+    case PreferredContentSizeSmall:
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_14);
+    case PreferredContentSizeLarge:
+    case PreferredContentSizeExtraLarge:
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_24);
+    case PreferredContentSizeMedium:
+    default:
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_18);
+  }
+}
+
 
 // Scroll Layer Handler
 
@@ -540,7 +555,7 @@ static void loading_window_load(Window *window) {
   text_layer_set_background_color(loadingTextLayer, GColorWhite);
   text_layer_set_text_alignment(loadingTextLayer, GTextAlignmentCenter);
   text_layer_set_text_color(loadingTextLayer, GColorBlack);
-  text_layer_set_font(loadingTextLayer, fonts_get_system_font(FONT_KEY_GOTHIC_28));
+  text_layer_set_font(loadingTextLayer, content_font(true));
   text_layer_set_overflow_mode(loadingTextLayer, GTextOverflowModeWordWrap);
 
   update_loading_text();
@@ -580,7 +595,7 @@ static void view_window_load(Window *window) {
   text_layer_set_background_color(viewBodyTextLayer, GColorWhite);
   text_layer_set_text_alignment(viewBodyTextLayer, GTextAlignmentCenter);
   text_layer_set_overflow_mode(viewBodyTextLayer, GTextOverflowModeWordWrap);
-  text_layer_set_font(viewBodyTextLayer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(viewBodyTextLayer, content_font(false));
 
   bar_load(window);
 
@@ -602,6 +617,8 @@ static void view_window_unload(Window *window) {
 // Basic Handlers
 
 static void init() {
+  s_content_size = preferred_content_size();
+
   messagesWindow = window_create();
 
   window_set_window_handlers(messagesWindow, (WindowHandlers) {

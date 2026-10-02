@@ -529,8 +529,9 @@ function loadMoreRooms() {
 
 function sendMessage(messages, i) {
 
+    // Newest first so the watch shows the latest message at the top.
     var ids = Object.keys(messages).sort(function(a, b) {
-        return a - b;
+        return b - a;
     });
 
     if (i >= ids.length) return;
