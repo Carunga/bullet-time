@@ -344,6 +344,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     if (messagesLayer) {
       menu_layer_reload_data(messagesLayer);
     }
+  } else if (strcmp(type, "CLEAR_ROOMS") == 0) {
+    roomsCounter = 0;
+    memset(rooms, 0, sizeof(rooms));
+
+    if (roomsLayer) {
+      menu_layer_reload_data(roomsLayer);
+    }
   } else if (strcmp(type, "NOT_CONF") == 0) {
     text_layer_set_text(loadingTextLayer, "Open Settings And Sign In With SSO");
   }
