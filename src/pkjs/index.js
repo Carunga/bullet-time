@@ -193,6 +193,17 @@ function login(callback) {
 
 }
 
+var SYNC_FILTER = {
+    room: {
+        state: { lazy_load_members: true },
+        timeline: { limit: 20 },
+        ephemeral: { limit: 0 },
+        account_data: { limit: 0 }
+    },
+    presence: { limit: 0 },
+    account_data: { limit: 0 }
+};
+
 function getSyncData(token, callback) {
 
     var hostserver = getHostServer();
@@ -200,7 +211,8 @@ function getSyncData(token, callback) {
 
     // Make https request
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", hostserver + "/_matrix/client/v3/sync?timeout=30000");
+    xhr.open("GET", hostserver + "/_matrix/client/v3/sync?timeout=30000&filter=" +
+        encodeURIComponent(JSON.stringify(SYNC_FILTER)));
 
     xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
@@ -347,7 +359,11 @@ function matrixSendMessage(message) {
 // Send functions
 
 function sendRooms(i) {
-    var id = Object.keys(syncData)[i];
+    var ids = Object.keys(syncData);
+
+    if (i >= ids.length) return;
+
+    var id = ids[i];
 
     Pebble.sendAppMessage(
         {'TYPE': 'ROOMS', 'ROOM_NAME': id},
@@ -360,7 +376,7 @@ function sendRooms(i) {
 
     setTimeout( function() {
             sendRooms(i+1);
-    }, 150);
+    }, 100);
 }
 
 function sendMessage(messages, i) {
@@ -388,7 +404,7 @@ function sendMessage(messages, i) {
 
     setTimeout( function() {
         sendMessage(messages, i+1);
-    }, 150);
+    }, 100);
 
 }
 
