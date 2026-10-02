@@ -7,6 +7,9 @@
 
 static DictationSession *dictationSession;
 
+static Window *homeWindow;
+static MenuLayer *homeLayer;
+
 static Window *roomsWindow;
 static MenuLayer *roomsLayer;
 
@@ -32,12 +35,17 @@ char messages[12][356];
 char senders[12][128];
 int messagesCounter = 1;
 
+char favourites[20][32];
+int favouritesCounter = 0;
+
 int progress = 0;
 
-static bool loadingDismissed = false;
+static bool loadingShown = false;
 static bool roomsHasMore = false;
+static bool roomsLoaded = false;
 static bool hasCache = false;
 static bool freshAnimated = false;
+static int pending_favourite = -1;
 static GRect rooms_anim_from;
 static GRect rooms_anim_to;
 
@@ -45,6 +53,9 @@ static void update_loading_text(void);
 static void request_more_rooms(void);
 static void request_cached_rooms(void);
 static void animate_rooms_in(void);
+static void show_latest_messages(void);
+static void send_favourite(int index, const char *text);
+static void start_favourite_dictation(int index);
 
 static PreferredContentSize s_content_size;
 
@@ -223,7 +234,19 @@ static void dictation_callback(
   char *transcription,
   void *context) {
 
-  if (status == DictationSessionStatusSuccess) {
+  if (status != DictationSessionStatusSuccess) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "Dictation cancelled");
+    pending_favourite = -1;
+    return;
+  }
+
+  if (pending_favourite >= 0) {
+    send_favourite(pending_favourite, transcription);
+    pending_favourite = -1;
+    return;
+  }
+
+  if (messagesCounter < 12) {
     strncpy(messages[messagesCounter], transcription, 127);
     messages[messagesCounter][127] = '\0';
 
@@ -231,15 +254,11 @@ static void dictation_callback(
     senders[messagesCounter][127] = '\0';
 
     messagesCounter++;
-
-    send_message(transcription);
-
-    menu_layer_reload_data(messagesLayer);
-  } else {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Dictation failed");
-    dictation_session_destroy(dictationSession);
-    dictationSession = NULL;
   }
+
+  send_message(transcription);
+
+  menu_layer_reload_data(messagesLayer);
 }
 
 static void load_dictation_message() {
@@ -257,6 +276,90 @@ static void load_dictation_message() {
 
 
 
+// Home Menu
+
+static uint16_t home_get_num_rows_callback(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  return 1 + favouritesCounter;
+}
+
+static void home_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  if (cell_index->row == 0) {
+    menu_cell_basic_draw(ctx, cell_layer, "Latest messages", NULL, NULL);
+    return;
+  }
+
+  menu_cell_basic_draw(ctx, cell_layer, favourites[cell_index->row - 1], NULL, NULL);
+}
+
+static void home_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (cell_index->row == 0) {
+    show_latest_messages();
+    return;
+  }
+
+  start_favourite_dictation(cell_index->row - 1);
+}
+
+static void home_window_load(Window *window) {
+  Layer *windowLayer = window_get_root_layer(window);
+  GRect bounds = reserve_bar_space(windowLayer);
+
+  homeLayer = menu_layer_create(bounds);
+
+  menu_layer_set_click_config_onto_window(homeLayer, window);
+
+  menu_layer_set_callbacks(homeLayer, NULL, (MenuLayerCallbacks) {
+    .get_num_rows = home_get_num_rows_callback,
+    .draw_row = home_draw_row_callback,
+    .select_click = home_select_callback
+  });
+
+  bar_load(window);
+
+  layer_add_child(windowLayer, menu_layer_get_layer(homeLayer));
+}
+
+static void home_window_unload(Window *window) {
+  menu_layer_destroy(homeLayer);
+  bar_unload();
+}
+
+
+// Navigation / favourites
+
+static void show_latest_messages(void) {
+  window_stack_push(roomsWindow, true);
+
+  if (!roomsLoaded) {
+    loadingShown = true;
+    window_stack_push(loadingWindow, false);
+  }
+}
+
+static void start_favourite_dictation(int index) {
+  if (!dictationSession) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "No dictation session");
+    return;
+  }
+
+  pending_favourite = index;
+
+  dictation_session_start(dictationSession);
+}
+
+static void send_favourite(int index, const char *text) {
+  DictionaryIterator *iter;
+  AppMessageResult res = app_message_outbox_begin(&iter);
+  if (res != APP_MSG_OK) return;
+
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_FAVOURITE");
+  dict_write_int32(iter, MESSAGE_KEY_FAVOURITE_INDEX, index);
+  dict_write_cstring(iter, MESSAGE_KEY_TEXT, text);
+
+  app_message_outbox_send();
+}
+
+
 // Message Select Handlers
 
 static void messages_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
@@ -264,7 +367,10 @@ static void messages_select_callback(MenuLayer *menu_layer, MenuIndex *cell_inde
 
   if (strcmp(text, "Speech to Text") == 0) {
     APP_LOG(APP_LOG_LEVEL_INFO, "STARTING DICTATION");
-    dictation_session_start(dictationSession);
+    if (dictationSession) {
+      pending_favourite = -1;
+      dictation_session_start(dictationSession);
+    }
   } else {
     window_stack_push(viewWindow, true);
     text_layer_set_text(viewBodyTextLayer, text);
@@ -352,20 +458,49 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     Tuple *cache_tuple = dict_find(iterator, MESSAGE_KEY_FROM_CACHE);
     bool fromCache = cache_tuple && cache_tuple->value->int32 != 0;
 
-    if (!loadingDismissed) {
-      loadingDismissed = true;
+    roomsLoaded = true;
+
+    if (loadingShown) {
+      loadingShown = false;
       if (loadingWindow) {
         window_stack_remove(loadingWindow, true);
       }
     }
 
-    if (!fromCache && !freshAnimated) {
+    if (!fromCache && !freshAnimated && roomsWindow &&
+        window_stack_get_top_window() == roomsWindow) {
       freshAnimated = true;
       animate_rooms_in();
     }
 
     if (roomsLayer) {
       menu_layer_reload_data(roomsLayer);
+    }
+  } else if (strcmp(type, "CLEAR_FAVOURITES") == 0) {
+    favouritesCounter = 0;
+    memset(favourites, 0, sizeof(favourites));
+
+    if (homeLayer) {
+      menu_layer_reload_data(homeLayer);
+    }
+  } else if (strcmp(type, "FAVOURITE") == 0) {
+    if (favouritesCounter >= 20) return;
+
+    Tuple *favourite_tuple = dict_find(iterator, MESSAGE_KEY_ROOM_NAME);
+    if (!favourite_tuple) return;
+
+    const char *favourite = favourite_tuple->value->cstring;
+
+    strncpy(favourites[favouritesCounter], favourite, 31);
+    favourites[favouritesCounter][31] = '\0';
+    favouritesCounter++;
+
+    if (homeLayer) {
+      menu_layer_reload_data(homeLayer);
+    }
+  } else if (strcmp(type, "FAVOURITES_DONE") == 0) {
+    if (homeLayer) {
+      menu_layer_reload_data(homeLayer);
     }
   } else if (strcmp(type, "CACHE_STATE") == 0) {
     Tuple *cache_tuple = dict_find(iterator, MESSAGE_KEY_HAS_CACHE);
@@ -506,6 +641,10 @@ static void rooms_window_load(Window *window) {
 
   layer_add_child(windowLayer, menu_layer_get_layer(roomsLayer));
 
+  if (roomsLoaded && !freshAnimated) {
+    freshAnimated = true;
+    animate_rooms_in();
+  }
 }
 
 static void rooms_window_unload(Window *window) {
@@ -619,6 +758,13 @@ static void view_window_unload(Window *window) {
 static void init() {
   s_content_size = preferred_content_size();
 
+  homeWindow = window_create();
+
+  window_set_window_handlers(homeWindow, (WindowHandlers) {
+    .load = home_window_load,
+    .unload = home_window_unload
+  });
+
   messagesWindow = window_create();
 
   window_set_window_handlers(messagesWindow, (WindowHandlers) {
@@ -666,11 +812,11 @@ static void init() {
   const int outbox_size = 128;
   app_message_open(inbox_size, outbox_size);
 
-  window_stack_push(roomsWindow, true);
-  window_stack_push(loadingWindow, false);
+  window_stack_push(homeWindow, true);
 }
 
 static void deinit() {
+  window_destroy(homeWindow);
   window_destroy(roomsWindow);
   window_destroy(messagesWindow);
   window_destroy(loadingWindow);

@@ -30,7 +30,8 @@
       "TYPE",
       "HAS_MORE",
       "FROM_CACHE",
-      "HAS_CACHE"
+      "HAS_CACHE",
+      "FAVOURITE_INDEX"
     ],
     "resources": {
       "media": [{

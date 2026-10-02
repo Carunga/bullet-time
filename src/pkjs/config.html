@@ -11,16 +11,29 @@
             <h1>Bullet Time</h1>
             <p class="subtitle">Matrix Client For Pebble :0</p>
             <div class="column" id="column-big">
-                <input id="hostserver" placeholder="https://matrix.your.server">
+                <div class="column" id="setup">
+                    <input id="hostserver" placeholder="https://matrix.your.server">
 
-                <button id="sso">Login with SSO</button>
-                <div class="column" id="providers"></div>
+                    <button id="sso">Login with SSO</button>
+                    <div class="column" id="providers"></div>
 
-                <hr>
+                    <hr>
 
-                <input id="user" placeholder="Username">
-                <input id="pass" placeholder="Password">
-                <button id="save">Save password</button>
+                    <input id="user" placeholder="Username">
+                    <input id="pass" placeholder="Password">
+                    <button id="save-password">Login</button>
+                </div>
+
+                <div class="column" id="favourites-section" hidden>
+                    <h2>Latest messages</h2>
+                    <div class="column" id="room-list"></div>
+                    <button id="load-more" hidden>Load more</button>
+
+                    <h2>Favourites</h2>
+                    <div class="column" id="favourites"></div>
+
+                    <button id="save">Save</button>
+                </div>
 
                 <p class="status" id="status"></p>
             </div>

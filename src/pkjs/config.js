@@ -1,4 +1,19 @@
 var SETTINGS_KEY = "matrix_settings";
+var MAX_FAVOURITES = 20;
+var ROOM_PAGE_SIZE = 10;
+
+// Same filter the watch uses: room names plus the latest message for ordering.
+var SYNC_FILTER = {
+    event_fields: ["type", "content.name", "origin_server_ts", "state_key", "room_id"],
+    room: {
+        state: { types: ["m.room.name"] },
+        timeline: { limit: 1, types: ["m.room.message"] },
+        ephemeral: { not_types: ["*"] },
+        account_data: { not_types: ["*"] }
+    },
+    presence: { not_types: ["*"] },
+    account_data: { not_types: ["*"] }
+};
 
 function getStoredSettings() {
     var raw = localStorage.getItem(SETTINGS_KEY);
@@ -10,8 +25,8 @@ function getStoredSettings() {
     }
 }
 
-function saveStoredSettings(settings) {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+function saveStoredSettings(value) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
 }
 
 function normalizeHost(host) {
@@ -35,6 +50,17 @@ function getQueryParam(name) {
     return decodeURIComponent(match[1].replace(/\+/g, " "));
 }
 
+function getFragmentParams() {
+    var params = {};
+    var hash = window.location.hash.replace(/^#/, "");
+    hash.split("&").forEach(function (pair) {
+        if (!pair) return;
+        var parts = pair.split("=");
+        params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || "");
+    });
+    return params;
+}
+
 function setStatus(message, isError) {
     var el = document.getElementById("status");
     if (!el) return;
@@ -42,12 +68,36 @@ function setStatus(message, isError) {
     el.className = "status" + (isError ? " error" : "");
 }
 
-function returnToPebble(settings) {
-    saveStoredSettings(settings);
-    document.location = "pebblejs://close#" + encodeURIComponent(JSON.stringify(settings));
+function returnToPebble(value) {
+    saveStoredSettings(value);
+    document.location = "pebblejs://close#" + encodeURIComponent(JSON.stringify(value));
 }
 
-// Exchange the SSO loginToken returned by the homeserver for an access token.
+// State
+
+var settings = getStoredSettings();
+var currentHost = "";
+var currentToken = "";
+var allRooms = [];
+var roomsShown = 0;
+var favourites = (settings.favourites || []).slice(0, MAX_FAVOURITES);
+
+function setAuth(host, response) {
+    currentHost = normalizeHost(host);
+    currentToken = response.access_token;
+
+    settings.hostserver = currentHost;
+    settings.access_token = response.access_token;
+    if (response.refresh_token) settings.refresh_token = response.refresh_token;
+    if (response.expires_in_ms) settings.expires_in_ms = response.expires_in_ms;
+    if (response.user_id) settings.user_id = response.user_id;
+    if (response.device_id) settings.device_id = response.device_id;
+
+    saveStoredSettings(settings);
+}
+
+// Sign in
+
 function exchangeLoginToken(host, token) {
     setStatus("Completing sign in...");
 
@@ -69,18 +119,11 @@ function exchangeLoginToken(host, token) {
             return;
         }
 
-        var settings = getStoredSettings();
-        settings.hostserver = host;
-        settings.access_token = response.access_token;
-        settings.refresh_token = response.refresh_token || "";
-        settings.expires_in_ms = response.expires_in_ms || 0;
-        settings.user_id = response.user_id || "";
-        settings.device_id = response.device_id || "";
         settings.auth = "sso";
         delete settings.user;
         delete settings.pass;
-
-        returnToPebble(settings);
+        setAuth(host, response);
+        showFavourites();
     };
 
     xhr.onerror = function () {
@@ -88,6 +131,44 @@ function exchangeLoginToken(host, token) {
     };
 
     xhr.send(JSON.stringify({ type: "m.login.token", token: token }));
+}
+
+function passwordLogin(host, user, pass) {
+    setStatus("Signing in...");
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", host + "/_matrix/client/v3/login");
+    xhr.setRequestHeader("Content-Type", "application/json");
+
+    xhr.onload = function () {
+        var response;
+        try {
+            response = JSON.parse(xhr.responseText);
+        } catch (e) {
+            response = {};
+        }
+
+        if (xhr.status < 200 || xhr.status >= 300 || !response.access_token) {
+            setStatus("Login failed: " + (response.error || xhr.status), true);
+            return;
+        }
+
+        settings.auth = "password";
+        settings.user = user;
+        settings.pass = pass;
+        setAuth(host, response);
+        showFavourites();
+    };
+
+    xhr.onerror = function () {
+        setStatus("Network error while signing in.", true);
+    };
+
+    xhr.send(JSON.stringify({
+        type: "m.login.password",
+        identifier: { type: "m.id.user", user: user },
+        password: pass
+    }));
 }
 
 function renderProviders(host, providers) {
@@ -117,7 +198,6 @@ function startSso(host, providerId) {
     window.location.href = url;
 }
 
-// Look up the homeserver's login flows and offer SSO providers if any exist.
 function discoverSsoProviders(host) {
     setStatus("Checking sign in options...");
 
@@ -163,27 +243,236 @@ function discoverSsoProviders(host) {
     xhr.send();
 }
 
-var stored = getStoredSettings();
+// Favourites
+
+function fetchRooms(callback) {
+    var url = currentHost + "/_matrix/client/v3/sync?timeout=0&filter=" +
+        encodeURIComponent(JSON.stringify(SYNC_FILTER));
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url);
+    xhr.setRequestHeader("Authorization", "Bearer " + currentToken);
+
+    xhr.onload = function () {
+        if (xhr.status === 401) {
+            callback("Session expired");
+            return;
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+            callback("Failed to load rooms (" + xhr.status + ")");
+            return;
+        }
+
+        var response;
+        try {
+            response = JSON.parse(xhr.responseText);
+        } catch (e) {
+            callback("Unexpected response from homeserver");
+            return;
+        }
+
+        var joined = (response.rooms || {}).join || {};
+        var rooms = [];
+
+        for (var id in joined) {
+            var data = joined[id];
+            var name = "(no name)";
+            var lastTs = 0;
+
+            var stateEvents = (data.state || {}).events || [];
+            for (var i = 0; i < stateEvents.length; i++) {
+                if (stateEvents[i].type === "m.room.name") {
+                    name = (stateEvents[i].content || {}).name || "(no name)";
+                }
+            }
+
+            var timelineEvents = (data.timeline || {}).events || [];
+            for (var i = 0; i < timelineEvents.length; i++) {
+                if (timelineEvents[i].type === "m.room.message") {
+                    lastTs = timelineEvents[i].origin_server_ts || 0;
+                }
+            }
+
+            rooms.push({ id: id, name: name, lastTs: lastTs });
+        }
+
+        rooms.sort(function (a, b) {
+            return b.lastTs - a.lastTs;
+        });
+
+        callback(null, rooms);
+    };
+
+    xhr.onerror = function () {
+        callback("Network error");
+    };
+
+    xhr.send();
+}
+
+function renderRoomList() {
+    var container = document.getElementById("room-list");
+    container.innerHTML = "";
+
+    var favouriteIds = {};
+    favourites.forEach(function (favourite) {
+        favouriteIds[favourite.id] = true;
+    });
+
+    for (var i = 0; i < roomsShown && i < allRooms.length; i++) {
+        var room = allRooms[i];
+
+        var row = document.createElement("div");
+        row.className = "room-row";
+
+        var label = document.createElement("span");
+        label.className = "room-name";
+        label.textContent = room.name;
+        row.appendChild(label);
+
+        if (favouriteIds[room.id]) {
+            var added = document.createElement("span");
+            added.className = "added";
+            added.textContent = "Added";
+            row.appendChild(added);
+        } else {
+            var add = document.createElement("button");
+            add.className = "small";
+            add.textContent = "Add";
+            add.addEventListener("click", (function (id, name) {
+                return function () {
+                    addFavourite(id, name);
+                };
+            })(room.id, room.name));
+            row.appendChild(add);
+        }
+
+        container.appendChild(row);
+    }
+
+    document.getElementById("load-more").hidden = roomsShown >= allRooms.length;
+}
+
+function renderFavourites() {
+    var container = document.getElementById("favourites");
+    container.innerHTML = "";
+
+    if (favourites.length === 0) {
+        var empty = document.createElement("p");
+        empty.className = "hint";
+        empty.textContent = "No favourites yet. Add some from the list above.";
+        container.appendChild(empty);
+        return;
+    }
+
+    favourites.forEach(function (favourite, index) {
+        var row = document.createElement("div");
+        row.className = "fav-row";
+
+        var label = document.createElement("span");
+        label.className = "room-name";
+        label.textContent = favourite.name;
+        row.appendChild(label);
+
+        var up = document.createElement("button");
+        up.className = "small";
+        up.textContent = "▲";
+        up.disabled = index === 0;
+        up.addEventListener("click", function () {
+            moveFavourite(index, -1);
+        });
+        row.appendChild(up);
+
+        var down = document.createElement("button");
+        down.className = "small";
+        down.textContent = "▼";
+        down.disabled = index === favourites.length - 1;
+        down.addEventListener("click", function () {
+            moveFavourite(index, 1);
+        });
+        row.appendChild(down);
+
+        var remove = document.createElement("button");
+        remove.className = "small";
+        remove.textContent = "✕";
+        remove.addEventListener("click", function () {
+            removeFavourite(index);
+        });
+        row.appendChild(remove);
+
+        container.appendChild(row);
+    });
+}
+
+function addFavourite(id, name) {
+    if (favourites.length >= MAX_FAVOURITES) {
+        setStatus("Maximum " + MAX_FAVOURITES + " favourites.", true);
+        return;
+    }
+
+    for (var i = 0; i < favourites.length; i++) {
+        if (favourites[i].id === id) return;
+    }
+
+    favourites.push({ id: id, name: name });
+    renderRoomList();
+    renderFavourites();
+}
+
+function removeFavourite(index) {
+    favourites.splice(index, 1);
+    renderRoomList();
+    renderFavourites();
+}
+
+function moveFavourite(index, delta) {
+    var target = index + delta;
+    if (target < 0 || target >= favourites.length) return;
+
+    var temp = favourites[index];
+    favourites[index] = favourites[target];
+    favourites[target] = temp;
+
+    renderFavourites();
+}
+
+function showFavourites() {
+    document.getElementById("setup").hidden = true;
+    document.getElementById("favourites-section").hidden = false;
+    setStatus("Loading rooms...");
+
+    fetchRooms(function (error, rooms) {
+        if (error) {
+            setStatus(error + ". Please sign in again.", true);
+            document.getElementById("setup").hidden = false;
+            document.getElementById("favourites-section").hidden = true;
+            return;
+        }
+
+        allRooms = rooms;
+        roomsShown = Math.min(ROOM_PAGE_SIZE, allRooms.length);
+        setStatus("");
+        renderRoomList();
+        renderFavourites();
+    });
+}
+
+function save() {
+    settings.hostserver = currentHost;
+    settings.access_token = currentToken;
+    settings.favourites = favourites;
+    returnToPebble(settings);
+}
+
+// Wiring
 
 var hostInput = document.getElementById("hostserver");
 var userInput = document.getElementById("user");
 var passInput = document.getElementById("pass");
 
-hostInput.value = stored.hostserver || "";
-userInput.value = stored.user || "";
-passInput.value = stored.pass || "";
-
-var loginToken = getQueryParam("loginToken");
-var queryHost = getQueryParam("host");
-
-if (loginToken) {
-    var ssoHost = normalizeHost(queryHost || stored.hostserver || "");
-    if (!ssoHost) {
-        setStatus("Missing homeserver for SSO sign in.", true);
-    } else {
-        exchangeLoginToken(ssoHost, loginToken);
-    }
-}
+hostInput.value = settings.hostserver || "";
+userInput.value = settings.user || "";
+passInput.value = settings.pass || "";
 
 document.getElementById("sso").addEventListener("click", function () {
     var host = normalizeHost(hostInput.value);
@@ -192,27 +481,56 @@ document.getElementById("sso").addEventListener("click", function () {
         return;
     }
     hostInput.value = host;
-
-    var settings = getStoredSettings();
     settings.hostserver = host;
     saveStoredSettings(settings);
-
     discoverSsoProviders(host);
 });
 
-document.getElementById("save").addEventListener("click", function () {
+document.getElementById("save-password").addEventListener("click", function () {
     var host = normalizeHost(hostInput.value);
     if (!host) {
         setStatus("Enter your homeserver URL first.", true);
         return;
     }
+    hostInput.value = host;
 
-    var settings = {
-        hostserver: host,
-        user: userInput.value.trim(),
-        pass: passInput.value.trim(),
-        auth: "password"
-    };
+    var user = userInput.value.trim();
+    var pass = passInput.value.trim();
+    if (!user || !pass) {
+        setStatus("Enter your username and password.", true);
+        return;
+    }
 
-    returnToPebble(settings);
+    passwordLogin(host, user, pass);
 });
+
+document.getElementById("load-more").addEventListener("click", function () {
+    roomsShown = Math.min(roomsShown + ROOM_PAGE_SIZE, allRooms.length);
+    renderRoomList();
+});
+
+document.getElementById("save").addEventListener("click", save);
+
+var loginToken = getQueryParam("loginToken");
+var queryHost = getQueryParam("host");
+var fragment = getFragmentParams();
+
+if (loginToken) {
+    var ssoHost = normalizeHost(queryHost || settings.hostserver || "");
+    if (!ssoHost) {
+        setStatus("Missing homeserver for SSO sign in.", true);
+    } else {
+        exchangeLoginToken(ssoHost, loginToken);
+    }
+} else if (fragment.token && fragment.host) {
+    currentHost = normalizeHost(fragment.host);
+    currentToken = fragment.token;
+    settings.hostserver = currentHost;
+    settings.access_token = currentToken;
+    saveStoredSettings(settings);
+    showFavourites();
+} else if (settings.access_token && settings.hostserver) {
+    currentHost = normalizeHost(settings.hostserver);
+    currentToken = settings.access_token;
+    showFavourites();
+}

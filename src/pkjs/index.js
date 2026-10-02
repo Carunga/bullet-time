@@ -385,19 +385,14 @@ function getSyncData(token, filterId, callback) {
         });
 }
 
-function matrixSendMessage(message) {
-    var room = syncData[currentRoom];
-    if (!room) return;
-
-    var id = room["id"];
+function sendMessageToRoom(roomId, message) {
+    var hostserver = getHostServer();
+    if (!hostserver || !roomId) return;
 
     var txnId = Date.now().toString();
 
-    var hostserver = getHostServer();
-    if (!hostserver) return;
-
     var url = hostserver + "/_matrix/client/v3/rooms/" +
-        encodeURIComponent(id) + "/send/m.room.message/" + txnId;
+        encodeURIComponent(roomId) + "/send/m.room.message/" + txnId;
 
     var data = {
         msgtype: "m.text",
@@ -413,6 +408,74 @@ function matrixSendMessage(message) {
         function (status) {
             console.log("Message send status:", status);
         });
+}
+
+function matrixSendMessage(message) {
+    var room = syncData[currentRoom];
+    if (!room) return;
+
+    sendMessageToRoom(room["id"], message);
+}
+
+// Favourites
+
+var MAX_FAVOURITES = 20;
+
+function getFavourites() {
+    var settings = getSettings();
+    var favourites = settings && settings['favourites'];
+    return (favourites && favourites.length) ? favourites : [];
+}
+
+function sendFavouriteItems(favourites, i) {
+    if (i >= favourites.length) {
+        Pebble.sendAppMessage(
+            {'TYPE': 'FAVOURITES_DONE'},
+            function() {},
+            function(e) {
+                console.log('Issue sending favourites done: ', e);
+            }
+        );
+        return;
+    }
+
+    Pebble.sendAppMessage(
+        {'TYPE': 'FAVOURITE', 'ROOM_NAME': favourites[i].name || favourites[i].id},
+        function() {},
+        function(e) {
+            console.log('Issue sending favourite: ', e);
+        }
+    );
+
+    setTimeout(function() {
+        sendFavouriteItems(favourites, i + 1);
+    }, 100);
+}
+
+function sendFavourites() {
+    var favourites = getFavourites().slice(0, MAX_FAVOURITES);
+
+    Pebble.sendAppMessage(
+        {'TYPE': 'CLEAR_FAVOURITES'},
+        function() {
+            sendFavouriteItems(favourites, 0);
+        },
+        function(e) {
+            console.log('Issue clearing favourites: ', e);
+            sendFavouriteItems(favourites, 0);
+        }
+    );
+}
+
+function sendFavouriteMessage(index, text) {
+    var favourites = getFavourites();
+    var favourite = favourites[index];
+    if (!favourite) {
+        console.log('No favourite at index', index);
+        return;
+    }
+
+    sendMessageToRoom(favourite.id, text);
 }
 
 // Send functions
@@ -711,6 +774,8 @@ function sendCacheState() {
 }
 
 function init() {
+    sendFavourites();
+
     login(function(token) {
         if (!token) {
             console.log('Login failed');
@@ -758,13 +823,24 @@ Pebble.addEventListener('appmessage', function(e) {
         loadMoreRooms();
     } else if (type == 'SHOW_CACHE') {
         showCachedRooms();
+    } else if (type == 'SEND_FAVOURITE') {
+        sendFavouriteMessage(e.payload.FAVOURITE_INDEX, e.payload.TEXT);
     }
 
 });        
 
 Pebble.addEventListener("showConfiguration", function() {
     console.log("Opening config page");
-    Pebble.openURL("https://carunga.github.io/bullet-time/src/pkjs/config.html");
+
+    var settings = getSettings() || {};
+    var fragment = "";
+
+    if (settings['access_token'] && settings['hostserver']) {
+        fragment = "#token=" + encodeURIComponent(settings['access_token']) +
+            "&host=" + encodeURIComponent(settings['hostserver']);
+    }
+
+    Pebble.openURL("https://carunga.github.io/bullet-time/src/pkjs/config.html" + fragment);
 });
 
 Pebble.addEventListener("webviewclosed", function(e) {

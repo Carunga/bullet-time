@@ -92,3 +92,62 @@ hr {
 .status.error {
     color: #b00020;
 }
+
+
+/* favourites */
+[hidden] {
+    display: none !important;
+}
+
+h2 {
+    font-size: 22px;
+    margin: 16px 0 4px 0;
+}
+
+#room-list,
+#favourites {
+    gap: 6px;
+}
+
+.room-row,
+.fav-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: calc(100vw - 40px);
+}
+
+.room-name {
+    font-size: 16px;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    justify-content: flex-start;
+}
+
+button.small {
+    height: 28px;
+    font-size: 15px;
+    padding: 0 10px;
+    margin-top: 0;
+    box-shadow: 0px 3px 0px 0px black;
+}
+
+button.small:disabled {
+    opacity: 0.4;
+}
+
+.added {
+    font-size: 14px;
+    color: #2e7d32;
+}
+
+.hint {
+    font-size: 15px;
+    color: #666666;
+    text-align: center;
+}
