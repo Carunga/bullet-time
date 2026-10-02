@@ -196,28 +196,58 @@ function login(callback) {
 var SYNC_FILTER = {
     room: {
         state: { lazy_load_members: true },
-        timeline: { limit: 20 },
-        ephemeral: { limit: 0 },
-        account_data: { limit: 0 }
-    },
-    presence: { limit: 0 },
-    account_data: { limit: 0 }
+        timeline: { limit: 20 }
+    }
 };
 
-function getSyncData(token, callback) {
+function getSyncData(token, useFilter, callback) {
 
     var hostserver = getHostServer();
-    if (!hostserver) return;
+    if (!hostserver) {
+        callback(null);
+        return;
+    }
+
+    var finished = false;
+    function done(data) {
+        if (finished) return;
+        finished = true;
+        callback(data);
+    }
+
+    var timeoutTimer = setTimeout(function () {
+        console.log("Sync timed out");
+        done(null);
+    }, 60000);
 
     // Make https request
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", hostserver + "/_matrix/client/v3/sync?timeout=30000&filter=" +
-        encodeURIComponent(JSON.stringify(SYNC_FILTER)));
+    var syncUrl = hostserver + "/_matrix/client/v3/sync?timeout=30000";
+    if (useFilter) {
+        syncUrl += "&filter=" + encodeURIComponent(JSON.stringify(SYNC_FILTER));
+    }
+    xhr.open("GET", syncUrl);
 
     xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
     xhr.onload = function () {
-        var responseText = JSON.parse(xhr.responseText);
+        clearTimeout(timeoutTimer);
+        console.log("Sync status:", xhr.status);
+
+        if (xhr.status < 200 || xhr.status >= 300) {
+            console.log("Sync failed:", xhr.responseText);
+            done(null);
+            return;
+        }
+
+        var responseText;
+        try {
+            responseText = JSON.parse(xhr.responseText);
+        } catch (err) {
+            console.log("Failed to parse sync response", err);
+            done(null);
+            return;
+        }
 
         var sortedRooms = {}
         const rooms = responseText["rooms"] || {};
@@ -304,12 +334,13 @@ function getSyncData(token, callback) {
 
         syncData = orderedSyncData;
 
-        callback(syncData);
+        done(syncData);
     };
 
     xhr.onerror = function () {
+        clearTimeout(timeoutTimer);
         console.log("Request failed (network error)");
-        callback(null);
+        done(null);
     };
 
     xhr.send();
@@ -425,39 +456,48 @@ Pebble.addEventListener('ready', function(e) {
 
     if (!getSettings()) {
         console.log("Couldn't find conf");
-        Pebble.sendAppMessage(
-            {
-                'TYPE': 'NOT_CONF'
-            },
-            function() {},
-            function(e) {
-                console.log('Issue sending configuration not found message to pebble ', e);
-            }
-        )
+        sendNotConf();
     } else {
-
         init();
-
     }
-    
 });
+
+function sendNotConf() {
+    Pebble.sendAppMessage(
+        { 'TYPE': 'NOT_CONF' },
+        function() {},
+        function(e) {
+            console.log('Issue sending configuration message to pebble ', e);
+        }
+    );
+}
 
 function init() {
     login(function(token) {
         if (token) {
             console.log('Logged in');
-            getSyncData(token, function(data) {
-                sendRooms(0);            
-            });
+            syncWithRetry(token, 0);
         } else {
             console.log('Login failed');
-            Pebble.sendAppMessage(
-                { 'TYPE': 'NOT_CONF' },
-                function() {},
-                function(e) {
-                    console.log('Issue sending login failure message to pebble ', e);
-                }
-            );
+            sendNotConf();
+        }
+    });
+}
+
+function syncWithRetry(token, attempt) {
+    var useFilter = attempt === 0;
+
+    getSyncData(token, useFilter, function(data) {
+        if (data && Object.keys(data).length > 0) {
+            sendRooms(0);
+        } else if (attempt < 1) {
+            console.log('Sync returned no rooms, retrying without filter');
+            setTimeout(function() {
+                syncWithRetry(token, attempt + 1);
+            }, 2000);
+        } else {
+            console.log('Sync failed after retries');
+            sendNotConf();
         }
     });
 }
