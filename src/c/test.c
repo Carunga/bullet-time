@@ -34,6 +34,8 @@ int messagesCounter = 1;
 
 int progress = 0;
 
+static bool loadingDismissed = false;
+
 
 // Scroll Layer Handler
 
@@ -76,7 +78,7 @@ static void bar_time_update() {
 
 static void bar_load(Window *window) {
 
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Loading Bar Window: %s");
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "Bar window loaded");
 
   Layer *windowLayer = window_get_root_layer(window);
   GRect windowBounds = layer_get_bounds(windowLayer);
@@ -197,8 +199,6 @@ static void dictation_callback(
   void *context) {
 
   if (status == DictationSessionStatusSuccess) {
-    APP_LOG(APP_LOG_LEVEL_INFO, "Heard: %s", transcription);
-
     strncpy(messages[messagesCounter], transcription, 127);
     messages[messagesCounter][127] = '\0';
 
@@ -237,8 +237,6 @@ static void load_dictation_message() {
 static void messages_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   char *text = messages[cell_index->row];
 
-  APP_LOG(APP_LOG_LEVEL_INFO, "Clicking message : %s", text);
-
   if (strcmp(text, "Speech to Text") == 0) {
     APP_LOG(APP_LOG_LEVEL_INFO, "STARTING DICTATION");
     dictation_session_start(dictationSession);
@@ -261,8 +259,6 @@ static uint16_t messages_get_num_rows_callback(MenuLayer *menu_layer, uint16_t s
 // Rooms Select Handlers
 
 static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "Opening room: %s", rooms[cell_index->row]);
-
   messagesCounter = 0;
 
   memset(messages, 0, sizeof(messages));
@@ -300,8 +296,12 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   if (strcmp(type, "ROOMS") == 0) {
 
     if (roomsCounter >= 32) return;
-    if (loadingWindow) {
-      window_stack_remove(loadingWindow, true);
+
+    if (!loadingDismissed) {
+      loadingDismissed = true;
+      if (loadingWindow) {
+        window_stack_remove(loadingWindow, true);
+      }
     }
 
     Tuple *room_tuple = dict_find(iterator, MESSAGE_KEY_ROOM_NAME);
@@ -312,8 +312,6 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     strncpy(rooms[roomsCounter], room, 31);
     rooms[roomsCounter][31] = '\0';
     roomsCounter++;
-
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Room ID: %s", room);
 
     if (roomsLayer) {
       menu_layer_reload_data(roomsLayer);
@@ -338,8 +336,6 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     strncpy(senders[messagesCounter], sender, 127);
     senders[messagesCounter][127] = '\0';
     messagesCounter++;
-
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Message Received: %s", text);
 
     if (messagesLayer) {
       menu_layer_reload_data(messagesLayer);
@@ -556,6 +552,7 @@ static void deinit() {
   window_destroy(roomsWindow);
   window_destroy(messagesWindow);
   window_destroy(loadingWindow);
+  window_destroy(viewWindow);
 
   tick_timer_service_unsubscribe();
 

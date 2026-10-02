@@ -416,10 +416,24 @@ function matrixSendMessage(message) {
 
 // Send functions
 
-function sendRooms(i) {
+// The watch only keeps 32 rooms; sending more is wasted traffic that can
+// overwhelm the AppMessage channel.
+var MAX_ROOMS = 32;
+var roomSendInProgress = false;
+var pendingRoomList = false;
+var lastRoomSignature = null;
+
+function roomListSignature() {
+    return Object.keys(syncData).slice(0, MAX_ROOMS).join("\n");
+}
+
+function sendRooms(i, done) {
     var ids = Object.keys(syncData);
 
-    if (i >= ids.length) return;
+    if (i >= ids.length || i >= MAX_ROOMS) {
+        if (done) done();
+        return;
+    }
 
     var id = ids[i];
 
@@ -433,19 +447,43 @@ function sendRooms(i) {
     );
 
     setTimeout( function() {
-            sendRooms(i+1);
+            sendRooms(i+1, done);
     }, 100);
 }
 
 function sendRoomList() {
+    var signature = roomListSignature();
+
+    if (signature === lastRoomSignature) {
+        console.log('Room list unchanged, not resending');
+        return;
+    }
+
+    if (roomSendInProgress) {
+        pendingRoomList = true;
+        return;
+    }
+
+    roomSendInProgress = true;
+
+    function finish() {
+        roomSendInProgress = false;
+        lastRoomSignature = signature;
+
+        if (pendingRoomList) {
+            pendingRoomList = false;
+            sendRoomList();
+        }
+    }
+
     Pebble.sendAppMessage(
         {'TYPE': 'CLEAR_ROOMS'},
         function() {
-            sendRooms(0);
+            sendRooms(0, finish);
         },
         function(e) {
             console.log('Issue clearing rooms: ', e);
-            sendRooms(0);
+            sendRooms(0, finish);
         }
     );
 }
@@ -468,7 +506,6 @@ function sendMessage(messages, i) {
             'TEXT': message["text"] || '(no content)'
         },
         function() {
-            console.log('Sending message ', message["text"] || '(no content)')
         },
         function(e) {
             console.log('Error sending message ', e);
