@@ -63,9 +63,32 @@ button:active {
     padding-top: 50px;
 }
 
+#providers {
+    gap: 10px;
+    padding-top: 0px;
+}
+
+hr {
+    width: calc(100vw - 40px);
+    border: none;
+    border-top: 1px solid #cccccc;
+    margin: 10px 0;
+}
+
 
 /* text effects */
 .subtitle {
     margin-top: 0px;
     padding-top: 0px;
+}
+
+.status {
+    font-size: 15px;
+    text-align: center;
+    min-height: 18px;
+    margin: 4px 0 0 0;
+}
+
+.status.error {
+    color: #b00020;
 }

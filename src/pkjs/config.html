@@ -12,9 +12,17 @@
             <p class="subtitle">Matrix Client For Pebble :0</p>
             <div class="column" id="column-big">
                 <input id="hostserver" placeholder="https://matrix.your.server">
+
+                <button id="sso">Login with SSO</button>
+                <div class="column" id="providers"></div>
+
+                <hr>
+
                 <input id="user" placeholder="Username">
                 <input id="pass" placeholder="Password">
-                <button id="save">Save</button>
+                <button id="save">Save password</button>
+
+                <p class="status" id="status"></p>
             </div>
         </div>
     </body>

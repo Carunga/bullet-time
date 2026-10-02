@@ -45,6 +45,10 @@ function getSettings() {
     return JSON.parse(s);
 }
 
+function saveSettings(settings) {
+    localStorage.setItem("matrix_settings", JSON.stringify(settings));
+}
+
 function getHostServer() {
     var settings = getSettings();
     if (!settings) return null;
@@ -54,30 +58,10 @@ function getHostServer() {
 
 // Api functions
 
-function login(callback) {
-
-    settings = getSettings();
-    if (!settings) {
-        callback(null);
-        return;
-    }
-
-    var hostserver = settings['hostserver'];
-    var user = settings['user'];
-    var pass = settings['pass'];
-
-    if (!hostserver || !user || !pass) {
-        console.log("Missing config values");
-        callback(null);
-        return;
-    }
-
-
-    // LOGIN
-
-    // Make https request
+function passwordLogin(hostserver, user, pass, callback) {
     var xhr = new XMLHttpRequest();
     xhr.open("POST", hostserver + "/_matrix/client/v3/login");
+    xhr.setRequestHeader("Content-Type", "application/json");
 
     var data = {
         'type': 'm.login.password',
@@ -86,13 +70,18 @@ function login(callback) {
             'user': user
         },
         'password': pass
-    }
+    };
 
     xhr.onload = function () {
-        var responseText = JSON.parse(xhr.responseText);
+        var responseText = {};
+        try {
+            responseText = JSON.parse(xhr.responseText);
+        } catch (err) {
+            responseText = {};
+        }
         console.log(xhr.responseText);
 
-        const token = responseText["access_token"] || null;
+        var token = responseText["access_token"] || null;
         authToken = token;
         callback(token);
     };
@@ -103,6 +92,104 @@ function login(callback) {
     };
 
     xhr.send(JSON.stringify(data));
+}
+
+// Exchange a stored refresh token for a fresh access token (used by SSO logins).
+function refreshAccessToken(settings, hostserver, callback) {
+    var refreshToken = settings['refresh_token'];
+    if (!refreshToken) {
+        callback(null);
+        return;
+    }
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", hostserver + "/_matrix/client/v3/refresh");
+    xhr.setRequestHeader("Content-Type", "application/json");
+
+    xhr.onload = function () {
+        var response = {};
+        try {
+            response = JSON.parse(xhr.responseText);
+        } catch (err) {
+            response = {};
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300 && response.access_token) {
+            settings['access_token'] = response.access_token;
+            if (response.refresh_token) settings['refresh_token'] = response.refresh_token;
+            if (response.expires_in_ms) settings['expires_in_ms'] = response.expires_in_ms;
+            saveSettings(settings);
+            authToken = response.access_token;
+            callback(response.access_token);
+        } else {
+            console.log("Token refresh failed", xhr.responseText);
+            callback(null);
+        }
+    };
+
+    xhr.onerror = function () {
+        console.log("Token refresh failed (network error)");
+        callback(null);
+    };
+
+    xhr.send(JSON.stringify({ refresh_token: refreshToken }));
+}
+
+// Confirm the stored access token is still valid, refreshing it if needed.
+function validateToken(settings, hostserver, callback) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", hostserver + "/_matrix/client/v3/account/whoami");
+    xhr.setRequestHeader("Authorization", "Bearer " + settings['access_token']);
+
+    xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+            callback(settings['access_token']);
+        } else if (xhr.status === 401) {
+            refreshAccessToken(settings, hostserver, callback);
+        } else {
+            callback(settings['access_token']);
+        }
+    };
+
+    xhr.onerror = function () {
+        callback(settings['access_token']);
+    };
+
+    xhr.send();
+}
+
+function login(callback) {
+
+    var settings = getSettings();
+    if (!settings) {
+        callback(null);
+        return;
+    }
+
+    var hostserver = settings['hostserver'];
+    if (!hostserver) {
+        console.log("Missing homeserver");
+        callback(null);
+        return;
+    }
+
+    // SSO logins persist an access token instead of a password.
+    if (settings['access_token']) {
+        authToken = settings['access_token'];
+        validateToken(settings, hostserver, callback);
+        return;
+    }
+
+    var user = settings['user'];
+    var pass = settings['pass'];
+
+    if (!user || !pass) {
+        console.log("Missing config values");
+        callback(null);
+        return;
+    }
+
+    passwordLogin(hostserver, user, pass, callback);
 
 }
 
@@ -342,10 +429,19 @@ Pebble.addEventListener('ready', function(e) {
 function init() {
     login(function(token) {
         if (token) {
-            console.log('TOKEN:', token);
+            console.log('Logged in');
             getSyncData(token, function(data) {
                 sendRooms(0);            
             });
+        } else {
+            console.log('Login failed');
+            Pebble.sendAppMessage(
+                { 'TYPE': 'NOT_CONF' },
+                function() {},
+                function(e) {
+                    console.log('Issue sending login failure message to pebble ', e);
+                }
+            );
         }
     });
 }
@@ -367,7 +463,7 @@ Pebble.addEventListener('appmessage', function(e) {
 
 Pebble.addEventListener("showConfiguration", function() {
     console.log("Opening config page");
-    Pebble.openURL("https://finbear2.github.io/bullet-time/src/pkjs/config.html");
+    Pebble.openURL("https://carunga.github.io/bullet-time/src/pkjs/config.html");
 });
 
 Pebble.addEventListener("webviewclosed", function(e) {

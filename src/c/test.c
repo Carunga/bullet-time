@@ -1,4 +1,4 @@
-#include </home/fin/.pebble-sdk/SDKs/4.9.148/sdk-core/pebble/basalt/include/pebble.h>
+#include <pebble.h>
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
@@ -345,7 +345,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       menu_layer_reload_data(messagesLayer);
     }
   } else if (strcmp(type, "NOT_CONF") == 0) {
-    text_layer_set_text(loadingTextLayer, "Please Go To Configuration Site And Setup Details");
+    text_layer_set_text(loadingTextLayer, "Open Settings And Sign In With SSO");
   }
   
 }
