@@ -436,16 +436,25 @@ function moveFavourite(index, delta) {
     renderFavourites();
 }
 
+function showSignInHint() {
+    var container = document.getElementById("room-list");
+    container.innerHTML = "";
+
+    var hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Sign in above to load your rooms.";
+    container.appendChild(hint);
+
+    document.getElementById("load-more").hidden = true;
+}
+
 function showFavourites() {
-    document.getElementById("setup").hidden = true;
-    document.getElementById("favourites-section").hidden = false;
     setStatus("Loading rooms...");
 
     fetchRooms(function (error, rooms) {
         if (error) {
-            setStatus(error + ". Please sign in again.", true);
-            document.getElementById("setup").hidden = false;
-            document.getElementById("favourites-section").hidden = true;
+            setStatus(error + ". Please sign in to load rooms.", true);
+            showSignInHint();
             return;
         }
 
@@ -511,6 +520,8 @@ document.getElementById("load-more").addEventListener("click", function () {
 
 document.getElementById("save").addEventListener("click", save);
 
+renderFavourites();
+
 var loginToken = getQueryParam("loginToken");
 var queryHost = getQueryParam("host");
 var fragment = getFragmentParams();
@@ -519,6 +530,7 @@ if (loginToken) {
     var ssoHost = normalizeHost(queryHost || settings.hostserver || "");
     if (!ssoHost) {
         setStatus("Missing homeserver for SSO sign in.", true);
+        showSignInHint();
     } else {
         exchangeLoginToken(ssoHost, loginToken);
     }
@@ -533,4 +545,6 @@ if (loginToken) {
     currentHost = normalizeHost(settings.hostserver);
     currentToken = settings.access_token;
     showFavourites();
+} else {
+    showSignInHint();
 }
