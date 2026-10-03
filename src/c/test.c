@@ -1,10 +1,12 @@
 #include <pebble.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-// Longest text we send over AppMessage.
-#define MAX_SEND_TEXT 300
+// Longest text we send over AppMessage. Kept small so a 2-key message stays
+// under the legacy AppMessage outbox ceiling.
+#define MAX_SEND_TEXT 200
 
 // Globals
 
@@ -38,6 +40,8 @@ char messages[12][356];
 char senders[12][128];
 int messagesCounter = 1;
 
+static char view_message[356];
+
 char favourites[20][32];
 int favouritesCounter = 0;
 
@@ -51,6 +55,7 @@ static bool freshAnimated = false;
 static int pending_favourite = -1;
 static GRect rooms_anim_from;
 static GRect rooms_anim_to;
+static PropertyAnimation *rooms_anim;
 
 static void update_loading_text(void);
 static void request_more_rooms(void);
@@ -59,6 +64,7 @@ static void animate_rooms_in(void);
 static void show_latest_messages(void);
 static void send_favourite(int index, const char *text);
 static void start_favourite_dictation(int index);
+static bool outbox_begin(DictionaryIterator **iter);
 
 static PreferredContentSize s_content_size;
 
@@ -203,14 +209,33 @@ static void progress_timer_callback(void *context) {
 static void get_room_messages(const char *room) {
 
   DictionaryIterator *iter;
-  AppMessageResult res = app_message_outbox_begin(&iter);
-  if(res != APP_MSG_OK) return;
+  if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE,  "ROOM_MESSAGES");
   dict_write_cstring(iter, MESSAGE_KEY_ROOM_NAME, room);
 
   app_message_outbox_send();
 
+}
+
+// The AppMessage outbox can end up stuck in OUT_WRITING (e.g. after a message
+// that was too large), after which every begin returns APP_MSG_INVALID_STATE.
+// Release it and retry so the app heals itself.
+static bool outbox_begin(DictionaryIterator **iter) {
+  AppMessageResult res = app_message_outbox_begin(iter);
+
+  if (res == APP_MSG_INVALID_STATE) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "Releasing stuck outbox");
+    app_message_outbox_send();
+    res = app_message_outbox_begin(iter);
+  }
+
+  if (res != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox begin failed: %d", (int) res);
+    return false;
+  }
+
+  return true;
 }
 
 static void send_message(const char *text) {
@@ -220,17 +245,10 @@ static void send_message(const char *text) {
   buffer[MAX_SEND_TEXT] = '\0';
 
   DictionaryIterator *iter;
-  AppMessageResult res = app_message_outbox_begin(&iter);
-  if (res != APP_MSG_OK) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox begin failed: %d", (int) res);
-    return;
-  }
+  if (!outbox_begin(&iter)) return;
 
-  if (!dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE") ||
-      !dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer)) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to write message");
-    return;
-  }
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
+  dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
 
   app_message_outbox_send();
 
@@ -271,7 +289,9 @@ static void dictation_callback(
 
   send_message(transcription);
 
-  menu_layer_reload_data(messagesLayer);
+  if (messagesLayer) {
+    menu_layer_reload_data(messagesLayer);
+  }
 }
 
 static void load_dictation_message() {
@@ -334,6 +354,7 @@ static void home_window_load(Window *window) {
 
 static void home_window_unload(Window *window) {
   menu_layer_destroy(homeLayer);
+  homeLayer = NULL;
   bar_unload();
 }
 
@@ -365,19 +386,16 @@ static void send_favourite(int index, const char *text) {
   strncpy(buffer, text, MAX_SEND_TEXT);
   buffer[MAX_SEND_TEXT] = '\0';
 
-  DictionaryIterator *iter;
-  AppMessageResult res = app_message_outbox_begin(&iter);
-  if (res != APP_MSG_OK) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox begin failed: %d", (int) res);
-    return;
-  }
+  // Encode the favourite index in the type so this stays a 2-key message,
+  // the same size as the (working) room send.
+  static char type[16];
+  snprintf(type, sizeof(type), "SEND_FAV%d", index);
 
-  if (!dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_FAVOURITE") ||
-      !dict_write_int32(iter, MESSAGE_KEY_FAVOURITE_INDEX, index) ||
-      !dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer)) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to write favourite message");
-    return;
-  }
+  DictionaryIterator *iter;
+  if (!outbox_begin(&iter)) return;
+
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, type);
+  dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
 
   app_message_outbox_send();
 }
@@ -395,9 +413,9 @@ static void messages_select_callback(MenuLayer *menu_layer, MenuIndex *cell_inde
       dictation_session_start(dictationSession);
     }
   } else {
+    strncpy(view_message, text, 355);
+    view_message[355] = '\0';
     window_stack_push(viewWindow, true);
-    text_layer_set_text(viewBodyTextLayer, text);
-    update_scroll_size();
   }
 
 }
@@ -563,7 +581,9 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
       menu_layer_reload_data(roomsLayer);
     }
   } else if (strcmp(type, "NOT_CONF") == 0) {
-    text_layer_set_text(loadingTextLayer, "Open Settings And Sign In With SSO");
+    if (loadingTextLayer) {
+      text_layer_set_text(loadingTextLayer, "Open Settings And Sign In With SSO");
+    }
   }
   
 }
@@ -597,8 +617,7 @@ static void update_loading_text(void) {
 
 static void request_more_rooms(void) {
   DictionaryIterator *iter;
-  AppMessageResult res = app_message_outbox_begin(&iter);
-  if (res != APP_MSG_OK) return;
+  if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE, "LOAD_MORE");
 
@@ -607,8 +626,7 @@ static void request_more_rooms(void) {
 
 static void request_cached_rooms(void) {
   DictionaryIterator *iter;
-  AppMessageResult res = app_message_outbox_begin(&iter);
-  if (res != APP_MSG_OK) return;
+  if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SHOW_CACHE");
 
@@ -635,11 +653,10 @@ static void animate_rooms_in(void) {
   rooms_anim_from = rooms_anim_to;
   rooms_anim_from.origin.y = rooms_anim_to.origin.y + rooms_anim_to.size.h;
 
-  PropertyAnimation *animation =
-      property_animation_create_layer_frame(layer, &rooms_anim_from, &rooms_anim_to);
-  animation_set_duration((Animation *)animation, 300);
-  animation_set_curve((Animation *)animation, AnimationCurveEaseOut);
-  animation_schedule((Animation *)animation);
+  rooms_anim = property_animation_create_layer_frame(layer, &rooms_anim_from, &rooms_anim_to);
+  animation_set_duration((Animation *)rooms_anim, 300);
+  animation_set_curve((Animation *)rooms_anim, AnimationCurveEaseOut);
+  animation_schedule((Animation *)rooms_anim);
 }
 
 
@@ -671,7 +688,13 @@ static void rooms_window_load(Window *window) {
 }
 
 static void rooms_window_unload(Window *window) {
+  if (rooms_anim) {
+    animation_unschedule((Animation *)rooms_anim);
+    rooms_anim = NULL;
+  }
+
   menu_layer_destroy(roomsLayer);
+  roomsLayer = NULL;
   bar_unload();
 }
 
@@ -701,6 +724,7 @@ static void messages_window_load(Window *window) {
 
 static void messages_window_unload(Window *window) {
   menu_layer_destroy(messagesLayer);
+  messagesLayer = NULL;
   bar_unload();
 }
 
@@ -734,6 +758,7 @@ static void loading_window_load(Window *window) {
 
 static void loading_window_unload(Window *window) {
   text_layer_destroy(loadingTextLayer);
+  loadingTextLayer = NULL;
   bar_unload();
   progress = 10;
   if (progressTimer) {
@@ -758,6 +783,7 @@ static void view_window_load(Window *window) {
   text_layer_set_text_alignment(viewBodyTextLayer, GTextAlignmentCenter);
   text_layer_set_overflow_mode(viewBodyTextLayer, GTextOverflowModeWordWrap);
   text_layer_set_font(viewBodyTextLayer, content_font(false));
+  text_layer_set_text(viewBodyTextLayer, view_message);
 
   bar_load(window);
 
@@ -770,7 +796,9 @@ static void view_window_load(Window *window) {
 
 static void view_window_unload(Window *window) {
   scroll_layer_destroy(viewScrollLayer);
+  viewScrollLayer = NULL;
   text_layer_destroy(viewBodyTextLayer);
+  viewBodyTextLayer = NULL;
 }
 
 
@@ -833,7 +861,9 @@ static void init() {
 
   const int inbox_size = 1024;
   const int outbox_size = 1024;
-  app_message_open(inbox_size, outbox_size);
+  AppMessageResult open_result = app_message_open(inbox_size, outbox_size);
+  APP_LOG(APP_LOG_LEVEL_INFO, "app_message_open: %d, max outbox: %d",
+          (int) open_result, (int) app_message_outbox_size_maximum());
 
   window_stack_push(homeWindow, true);
 }

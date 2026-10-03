@@ -823,8 +823,9 @@ Pebble.addEventListener('appmessage', function(e) {
         loadMoreRooms();
     } else if (type == 'SHOW_CACHE') {
         showCachedRooms();
-    } else if (type == 'SEND_FAVOURITE') {
-        sendFavouriteMessage(e.payload.FAVOURITE_INDEX, e.payload.TEXT);
+    } else if (type && type.indexOf('SEND_FAV') === 0) {
+        var favouriteIndex = parseInt(type.substring(8), 10);
+        sendFavouriteMessage(favouriteIndex, e.payload.TEXT);
     }
 
 });        
