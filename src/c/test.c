@@ -26,7 +26,7 @@ static TextLayer *loadingTextLayer;
 
 static Window *viewWindow;
 static ScrollLayer *viewScrollLayer;
-static TextLayer *viewBodyTextLayer;
+static Layer *conversationLayer;
 
 static Layer *topBarLayer;
 static TextLayer *topBarTextLayer;
@@ -41,8 +41,17 @@ char favourites[20][32];
 int favouritesCounter = 0;
 
 #define CONVERSATION_MAX 6144
+#define CONVERSATION_MAX_MESSAGES 64
 static char conversation[CONVERSATION_MAX];
 static int conversation_len = 0;
+
+typedef struct {
+  uint16_t header;
+  uint16_t body;
+} ConversationEntry;
+
+static ConversationEntry conversation_entries[CONVERSATION_MAX_MESSAGES];
+static int conversation_count = 0;
 
 static GRect conversation_bounds;
 static bool loading_older = false;
@@ -96,12 +105,105 @@ static GFont content_font(bool bold) {
 
 // Scroll Layer Handler
 
-static void update_scroll_size() {
-  GSize textSize = text_layer_get_content_size(viewBodyTextLayer);
+static int conversation_header_text(int i, char *out, int outsize) {
+  int start = conversation_entries[i].header;
+  int len = (int) conversation_entries[i].body - start - 1;
+  if (len < 0) len = 0;
+  if (len > outsize - 1) len = outsize - 1;
+  memcpy(out, conversation + start, len);
+  out[len] = '\0';
+  return len;
+}
 
-  textSize.h += 20;
+static int conversation_body_text(int i, char *out, int outsize) {
+  int start = conversation_entries[i].body;
+  int end = (i + 1 < conversation_count) ? conversation_entries[i + 1].header : conversation_len;
+  int len = end - start;
+  while (len > 0 && conversation[start + len - 1] == '\n') len--;
+  if (len < 0) len = 0;
+  if (len > outsize - 1) len = outsize - 1;
+  memcpy(out, conversation + start, len);
+  out[len] = '\0';
+  return len;
+}
 
-  scroll_layer_set_content_size(viewScrollLayer, textSize);
+static void conversation_draw(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  int width = bounds.size.w;
+  int y = 0;
+
+  GFont header_font = content_font(true);
+  GFont body_font = content_font(false);
+  GSize sample = graphics_text_layout_get_content_size(
+      "Ag", header_font, GRect(0, 0, width, 100),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  int header_h = sample.h + 4;
+
+  static char header_text[64];
+  static char body_text[320];
+
+  for (int i = 0; i < conversation_count; i++) {
+    conversation_header_text(i, header_text, sizeof(header_text));
+
+    graphics_context_set_fill_color(ctx, HIGHLIGHT_COLOR);
+    graphics_fill_rect(ctx, GRect(0, y, width, header_h), 0, GCornerNone);
+
+    graphics_context_set_text_color(ctx, gcolor_legible_over(HIGHLIGHT_COLOR));
+    graphics_draw_text(ctx, header_text, header_font, GRect(4, y + 2, width - 8, header_h),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += header_h;
+
+    conversation_body_text(i, body_text, sizeof(body_text));
+
+    GSize body_size = graphics_text_layout_get_content_size(
+        body_text, body_font, GRect(4, y, width - 8, 4000),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft);
+
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, body_text, body_font, GRect(4, y, width - 8, body_size.h + 4),
+                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+
+    y += body_size.h + 6;
+  }
+}
+
+static int conversation_layout_height(int width) {
+  int y = 0;
+
+  GFont header_font = content_font(true);
+  GFont body_font = content_font(false);
+  GSize sample = graphics_text_layout_get_content_size(
+      "Ag", header_font, GRect(0, 0, width, 100),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  int header_h = sample.h + 4;
+
+  static char body_text[320];
+
+  for (int i = 0; i < conversation_count; i++) {
+    y += header_h;
+
+    conversation_body_text(i, body_text, sizeof(body_text));
+
+    GSize body_size = graphics_text_layout_get_content_size(
+        body_text, body_font, GRect(4, y, width - 8, 4000),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft);
+
+    y += body_size.h + 6;
+  }
+
+  if (y < 1) y = 1;
+  return y;
+}
+
+static void conversation_update(void) {
+  if (!conversationLayer || !viewScrollLayer) return;
+
+  int width = conversation_bounds.size.w;
+  int height = conversation_layout_height(width);
+
+  layer_set_frame(conversationLayer, GRect(0, 0, width, height));
+  scroll_layer_set_content_size(viewScrollLayer, GSize(width, height));
+  layer_mark_dirty(conversationLayer);
 }
 
 
@@ -303,26 +405,46 @@ static void format_message_time(int epoch_sec, char *out, size_t outlen) {
 static void reset_conversation(void) {
   conversation[0] = '\0';
   conversation_len = 0;
+  conversation_count = 0;
   no_more_messages = false;
   loading_older = false;
 }
 
 static void append_conversation(const char *sender, int epoch_sec, const char *text) {
+  if (conversation_count >= CONVERSATION_MAX_MESSAGES) return;
+
   char timebuf[24];
   format_message_time(epoch_sec, timebuf, sizeof(timebuf));
 
   int remaining = CONVERSATION_MAX - conversation_len - 1;
   if (remaining <= 0) return;
 
-  int written = snprintf(conversation + conversation_len, remaining, "%s - %s\n%s\n\n",
-                         sender, timebuf, text);
-  if (written < 0) return;
+  conversation_entries[conversation_count].header = (uint16_t) conversation_len;
 
+  int written = snprintf(conversation + conversation_len, remaining, "%s - %s\n", sender, timebuf);
+  if (written < 0) return;
   if (written >= remaining) {
     conversation_len = CONVERSATION_MAX - 1;
-  } else {
-    conversation_len += written;
+    return;
   }
+  conversation_len += written;
+
+  conversation_entries[conversation_count].body = (uint16_t) conversation_len;
+
+  char body[301];
+  strncpy(body, text, 300);
+  body[300] = '\0';
+
+  remaining = CONVERSATION_MAX - conversation_len - 1;
+  written = snprintf(conversation + conversation_len, remaining, "%s\n\n", body);
+  if (written < 0) return;
+  if (written >= remaining) {
+    conversation_len = CONVERSATION_MAX - 1;
+    return;
+  }
+  conversation_len += written;
+
+  conversation_count++;
 }
 
 
@@ -360,10 +482,7 @@ static void dictation_callback(
   append_conversation("You", (int) time(NULL), transcription);
   send_message(transcription);
 
-  if (viewBodyTextLayer) {
-    text_layer_set_text(viewBodyTextLayer, conversation);
-    update_scroll_size();
-  }
+  conversation_update();
 }
 
 
@@ -628,10 +747,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     append_conversation(sender_tuple->value->cstring, epoch, text_tuple->value->cstring);
     loading_older = false;
 
-    if (viewBodyTextLayer) {
-      text_layer_set_text(viewBodyTextLayer, conversation);
-      update_scroll_size();
-    }
+    conversation_update();
   } else if (strcmp(type, "NO_MORE") == 0) {
     no_more_messages = true;
     loading_older = false;
@@ -851,28 +967,23 @@ static void view_window_load(Window *window) {
 
   scroll_layer_set_click_config_onto_window(viewScrollLayer, window);
 
-  viewBodyTextLayer = text_layer_create(GRect(5, 20, bounds.size.w - 10, 20000));
-
-  text_layer_set_background_color(viewBodyTextLayer, GColorWhite);
-  text_layer_set_text_alignment(viewBodyTextLayer, GTextAlignmentLeft);
-  text_layer_set_overflow_mode(viewBodyTextLayer, GTextOverflowModeWordWrap);
-  text_layer_set_font(viewBodyTextLayer, content_font(false));
-  text_layer_set_text(viewBodyTextLayer, conversation);
+  conversationLayer = layer_create(GRect(0, 0, bounds.size.w, 1));
+  layer_set_update_proc(conversationLayer, conversation_draw);
 
   bar_load(window);
 
-  scroll_layer_add_child(viewScrollLayer, text_layer_get_layer(viewBodyTextLayer));
+  scroll_layer_add_child(viewScrollLayer, conversationLayer);
   layer_add_child(windowLayer, scroll_layer_get_layer(viewScrollLayer));
 
-  update_scroll_size();
+  conversation_update();
 
 }
 
 static void view_window_unload(Window *window) {
   scroll_layer_destroy(viewScrollLayer);
   viewScrollLayer = NULL;
-  text_layer_destroy(viewBodyTextLayer);
-  viewBodyTextLayer = NULL;
+  layer_destroy(conversationLayer);
+  conversationLayer = NULL;
 }
 
 
