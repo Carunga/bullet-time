@@ -3,6 +3,9 @@
 #include <string.h>
 #include <time.h>
 
+// Longest text we send over AppMessage.
+#define MAX_SEND_TEXT 300
+
 // Globals
 
 static DictationSession *dictationSession;
@@ -212,12 +215,22 @@ static void get_room_messages(const char *room) {
 
 static void send_message(const char *text) {
 
+  static char buffer[MAX_SEND_TEXT + 1];
+  strncpy(buffer, text, MAX_SEND_TEXT);
+  buffer[MAX_SEND_TEXT] = '\0';
+
   DictionaryIterator *iter;
   AppMessageResult res = app_message_outbox_begin(&iter);
-  if(res != APP_MSG_OK) return;
+  if (res != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox begin failed: %d", (int) res);
+    return;
+  }
 
-  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
-  dict_write_cstring(iter, MESSAGE_KEY_TEXT, text);
+  if (!dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE") ||
+      !dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer)) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to write message");
+    return;
+  }
 
   app_message_outbox_send();
 
@@ -348,13 +361,23 @@ static void start_favourite_dictation(int index) {
 }
 
 static void send_favourite(int index, const char *text) {
+  static char buffer[MAX_SEND_TEXT + 1];
+  strncpy(buffer, text, MAX_SEND_TEXT);
+  buffer[MAX_SEND_TEXT] = '\0';
+
   DictionaryIterator *iter;
   AppMessageResult res = app_message_outbox_begin(&iter);
-  if (res != APP_MSG_OK) return;
+  if (res != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox begin failed: %d", (int) res);
+    return;
+  }
 
-  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_FAVOURITE");
-  dict_write_int32(iter, MESSAGE_KEY_FAVOURITE_INDEX, index);
-  dict_write_cstring(iter, MESSAGE_KEY_TEXT, text);
+  if (!dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_FAVOURITE") ||
+      !dict_write_int32(iter, MESSAGE_KEY_FAVOURITE_INDEX, index) ||
+      !dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer)) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Failed to write favourite message");
+    return;
+  }
 
   app_message_outbox_send();
 }
@@ -809,7 +832,7 @@ static void init() {
   app_message_register_outbox_sent(outbox_sent_callback);
 
   const int inbox_size = 1024;
-  const int outbox_size = 128;
+  const int outbox_size = 1024;
   app_message_open(inbox_size, outbox_size);
 
   window_stack_push(homeWindow, true);
