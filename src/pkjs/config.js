@@ -89,6 +89,29 @@ function setStatus(message, isError) {
     el.className = "status" + (isError ? " error" : "");
 }
 
+// Small XHR helper. callback(status, responseText).
+function request(method, url, headers, body, callback) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    if (headers) {
+        for (var name in headers) {
+            if (headers.hasOwnProperty(name)) xhr.setRequestHeader(name, headers[name]);
+        }
+    }
+    xhr.onload = function () { callback(xhr.status, xhr.responseText); };
+    xhr.onerror = function () { callback(0, null); };
+    xhr.send(body || null);
+}
+
+// Like request(), but parses the body as JSON ({} on failure).
+function requestJson(method, url, headers, body, callback) {
+    request(method, url, headers, body, function (status, text) {
+        var response = {};
+        try { response = JSON.parse(text); } catch (e) { response = {}; }
+        callback(status, response);
+    });
+}
+
 function returnToPebble(value) {
     saveStoredSettings(value);
     document.location = "pebblejs://close#" + encodeURIComponent(JSON.stringify(value));
@@ -126,72 +149,41 @@ function setAuth(host, response) {
 function exchangeLoginToken(host, token) {
     setStatus("Completing sign in...");
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", host + "/_matrix/client/v3/login");
-    xhr.setRequestHeader("Content-Type", "application/json");
+    requestJson("POST", host + "/_matrix/client/v3/login",
+        { "Content-Type": "application/json" },
+        JSON.stringify({ type: "m.login.token", token: token }),
+        function (status, response) {
+            if (status < 200 || status >= 300 || !response.access_token) {
+                setStatus("SSO login failed: " + (response.error || status), true);
+                return;
+            }
 
-    xhr.onload = function () {
-        var response;
-        try {
-            response = JSON.parse(xhr.responseText);
-        } catch (e) {
-            setStatus("Unexpected response from homeserver.", true);
-            return;
-        }
-
-        if (xhr.status < 200 || xhr.status >= 300 || !response.access_token) {
-            setStatus("SSO login failed: " + (response.error || xhr.status), true);
-            return;
-        }
-
-        settings.auth = "sso";
-        delete settings.user;
-        delete settings.pass;
-        setAuth(host, response);
-        showFavourites();
-    };
-
-    xhr.onerror = function () {
-        setStatus("Network error while completing sign in.", true);
-    };
-
-    xhr.send(JSON.stringify({ type: "m.login.token", token: token }));
+            settings.auth = "sso";
+            setAuth(host, response);
+            showFavourites();
+        });
 }
 
 function passwordLogin(host, user, pass) {
     setStatus("Signing in...");
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", host + "/_matrix/client/v3/login");
-    xhr.setRequestHeader("Content-Type", "application/json");
+    requestJson("POST", host + "/_matrix/client/v3/login",
+        { "Content-Type": "application/json" },
+        JSON.stringify({
+            type: "m.login.password",
+            identifier: { type: "m.id.user", user: user },
+            password: pass
+        }),
+        function (status, response) {
+            if (status < 200 || status >= 300 || !response.access_token) {
+                setStatus("Login failed: " + (response.error || status), true);
+                return;
+            }
 
-    xhr.onload = function () {
-        var response;
-        try {
-            response = JSON.parse(xhr.responseText);
-        } catch (e) {
-            response = {};
-        }
-
-        if (xhr.status < 200 || xhr.status >= 300 || !response.access_token) {
-            setStatus("Login failed: " + (response.error || xhr.status), true);
-            return;
-        }
-
-        settings.auth = "password";
-        setAuth(host, response);
-        showFavourites();
-    };
-
-    xhr.onerror = function () {
-        setStatus("Network error while signing in.", true);
-    };
-
-    xhr.send(JSON.stringify({
-        type: "m.login.password",
-        identifier: { type: "m.id.user", user: user },
-        password: pass
-    }));
+            settings.auth = "password";
+            setAuth(host, response);
+            showFavourites();
+        });
 }
 
 function renderProviders(host, providers) {
@@ -224,46 +216,43 @@ function startSso(host, providerId) {
 function discoverSsoProviders(host) {
     setStatus("Checking sign in options...");
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", host + "/_matrix/client/v3/login");
-
-    xhr.onload = function () {
-        var response;
-        try {
-            response = JSON.parse(xhr.responseText);
-        } catch (e) {
-            startSso(host, null);
-            return;
-        }
-
-        var flows = response.flows || [];
-        var ssoFlow = null;
-        for (var i = 0; i < flows.length; i++) {
-            if (flows[i].type === "m.login.sso") {
-                ssoFlow = flows[i];
-                break;
+    request("GET", host + "/_matrix/client/v3/login", null, null,
+        function (status, text) {
+            if (status < 200 || status >= 300) {
+                setStatus("Could not reach homeserver.", true);
+                return;
             }
-        }
 
-        if (!ssoFlow) {
-            setStatus("This server does not support SSO. Use a username and password.", true);
-            return;
-        }
+            var response;
+            try {
+                response = JSON.parse(text);
+            } catch (e) {
+                startSso(host, null);
+                return;
+            }
 
-        var providers = ssoFlow.identity_providers || [];
-        if (providers.length === 0) {
-            startSso(host, null);
-            return;
-        }
+            var flows = response.flows || [];
+            var ssoFlow = null;
+            for (var i = 0; i < flows.length; i++) {
+                if (flows[i].type === "m.login.sso") {
+                    ssoFlow = flows[i];
+                    break;
+                }
+            }
 
-        renderProviders(host, providers);
-    };
+            if (!ssoFlow) {
+                setStatus("This server does not support SSO. Use a username and password.", true);
+                return;
+            }
 
-    xhr.onerror = function () {
-        setStatus("Could not reach homeserver.", true);
-    };
+            var providers = ssoFlow.identity_providers || [];
+            if (providers.length === 0) {
+                startSso(host, null);
+                return;
+            }
 
-    xhr.send();
+            renderProviders(host, providers);
+        });
 }
 
 // Favourites
@@ -272,65 +261,60 @@ function fetchRooms(callback) {
     var url = currentHost + "/_matrix/client/v3/sync?timeout=0&filter=" +
         encodeURIComponent(JSON.stringify(SYNC_FILTER));
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", url);
-    xhr.setRequestHeader("Authorization", "Bearer " + currentToken);
-
-    xhr.onload = function () {
-        if (xhr.status === 401) {
-            callback("Session expired");
-            return;
-        }
-        if (xhr.status < 200 || xhr.status >= 300) {
-            callback("Failed to load rooms (" + xhr.status + ")");
-            return;
-        }
-
-        var response;
-        try {
-            response = JSON.parse(xhr.responseText);
-        } catch (e) {
-            callback("Unexpected response from homeserver");
-            return;
-        }
-
-        var joined = (response.rooms || {}).join || {};
-        var rooms = [];
-
-        for (var id in joined) {
-            var data = joined[id];
-            var name = "(no name)";
-            var lastTs = 0;
-
-            var stateEvents = (data.state || {}).events || [];
-            for (var i = 0; i < stateEvents.length; i++) {
-                if (stateEvents[i].type === "m.room.name") {
-                    name = (stateEvents[i].content || {}).name || "(no name)";
-                }
+    request("GET", url, { "Authorization": "Bearer " + currentToken }, null,
+        function (status, text) {
+            if (status === 0) {
+                callback("Network error");
+                return;
+            }
+            if (status === 401) {
+                callback("Session expired");
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                callback("Failed to load rooms (" + status + ")");
+                return;
             }
 
-            var timelineEvents = (data.timeline || {}).events || [];
-            for (var i = 0; i < timelineEvents.length; i++) {
-                if (timelineEvents[i].type === "m.room.message") {
-                    lastTs = timelineEvents[i].origin_server_ts || 0;
-                }
+            var response;
+            try {
+                response = JSON.parse(text);
+            } catch (e) {
+                callback("Unexpected response from homeserver");
+                return;
             }
 
-            rooms.push({ id: id, name: name, lastTs: lastTs });
-        }
+            var joined = (response.rooms || {}).join || {};
+            var rooms = [];
 
-        rooms.sort(function (a, b) {
-            return b.lastTs - a.lastTs;
+            for (var id in joined) {
+                var data = joined[id];
+                var name = "(no name)";
+                var lastTs = 0;
+
+                var stateEvents = (data.state || {}).events || [];
+                for (var i = 0; i < stateEvents.length; i++) {
+                    if (stateEvents[i].type === "m.room.name") {
+                        name = (stateEvents[i].content || {}).name || "(no name)";
+                    }
+                }
+
+                var timelineEvents = (data.timeline || {}).events || [];
+                for (var i = 0; i < timelineEvents.length; i++) {
+                    if (timelineEvents[i].type === "m.room.message") {
+                        lastTs = timelineEvents[i].origin_server_ts || 0;
+                    }
+                }
+
+                rooms.push({ id: id, name: name, lastTs: lastTs });
+            }
+
+            rooms.sort(function (a, b) {
+                return b.lastTs - a.lastTs;
+            });
+
+            callback(null, rooms);
         });
-
-        callback(null, rooms);
-    };
-
-    xhr.onerror = function () {
-        callback("Network error");
-    };
-
-    xhr.send();
 }
 
 function renderRoomList() {
@@ -519,12 +503,9 @@ function logout() {
 
     setStatus("Logging out...");
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", currentHost + "/_matrix/client/v3/logout");
-    xhr.setRequestHeader("Authorization", "Bearer " + currentToken);
-    xhr.onload = function () { finish(); };
-    xhr.onerror = function () { finish(); };
-    xhr.send();
+    request("POST", currentHost + "/_matrix/client/v3/logout",
+        { "Authorization": "Bearer " + currentToken }, null,
+        function () { finish(); });
 }
 
 // Wiring
@@ -534,8 +515,6 @@ var userInput = document.getElementById("user");
 var passInput = document.getElementById("pass");
 
 hostInput.value = settings.hostserver || "";
-userInput.value = settings.user || "";
-passInput.value = settings.pass || "";
 
 document.getElementById("sso").addEventListener("click", function () {
     var host = normalizeHost(hostInput.value);
@@ -607,15 +586,6 @@ if (loginToken) {
         settings.hostserver = currentHost;
         settings.access_token = currentToken;
         saveStoredSettings(settings);
-        showFavourites();
-    }
-} else if (settings.access_token && settings.hostserver) {
-    currentHost = normalizeHost(settings.hostserver);
-    if (!currentHost) {
-        setStatus("This homeserver must use https://.", true);
-        showSignInHint();
-    } else {
-        currentToken = settings.access_token;
         showFavourites();
     }
 } else {

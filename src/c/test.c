@@ -48,6 +48,7 @@ static int conversation_len = 0;
 typedef struct {
   uint16_t header;
   uint16_t body;
+  uint16_t body_h;
 } ConversationEntry;
 
 static ConversationEntry conversation_entries[CONVERSATION_MAX_MESSAGES];
@@ -80,7 +81,6 @@ static void send_favourite(int index, const char *text);
 static void start_favourite_dictation(int index);
 static bool outbox_begin(DictionaryIterator **iter);
 static void append_conversation(const char *sender, int epoch_sec, const char *text);
-static void send_message_to_index(int index, const char *text);
 static void start_room_dictation(int index);
 static void start_current_dictation(void);
 
@@ -126,6 +126,39 @@ static int conversation_body_text(int i, char *out, int outsize) {
   return len;
 }
 
+static int conversation_header_height(int width) {
+  GFont header_font = content_font(true);
+  GSize sample = graphics_text_layout_get_content_size(
+      "Ag", header_font, GRect(0, 0, width, 100),
+      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  return sample.h + 4;
+}
+
+// Measure each body once (stores body_h); conversation_draw reuses the cache.
+static int conversation_layout_height(int width) {
+  int y = 0;
+  int header_h = conversation_header_height(width);
+  GFont body_font = content_font(false);
+
+  static char body_text[320];
+
+  for (int i = 0; i < conversation_count; i++) {
+    y += header_h;
+
+    conversation_body_text(i, body_text, sizeof(body_text));
+
+    GSize body_size = graphics_text_layout_get_content_size(
+        body_text, body_font, GRect(4, y, width - 8, 4000),
+        GTextOverflowModeWordWrap, GTextAlignmentLeft);
+
+    conversation_entries[i].body_h = body_size.h;
+    y += body_size.h + 6;
+  }
+
+  if (y < 1) y = 1;
+  return y;
+}
+
 static void conversation_draw(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   int width = bounds.size.w;
@@ -133,15 +166,14 @@ static void conversation_draw(Layer *layer, GContext *ctx) {
 
   GFont header_font = content_font(true);
   GFont body_font = content_font(false);
-  GSize sample = graphics_text_layout_get_content_size(
-      "Ag", header_font, GRect(0, 0, width, 100),
-      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  int header_h = sample.h + 4;
+  int header_h = conversation_header_height(width);
 
   static char header_text[64];
   static char body_text[320];
 
   for (int i = 0; i < conversation_count; i++) {
+    int body_h = conversation_entries[i].body_h;
+
     conversation_header_text(i, header_text, sizeof(header_text));
 
     graphics_context_set_fill_color(ctx, HIGHLIGHT_COLOR);
@@ -154,44 +186,12 @@ static void conversation_draw(Layer *layer, GContext *ctx) {
 
     conversation_body_text(i, body_text, sizeof(body_text));
 
-    GSize body_size = graphics_text_layout_get_content_size(
-        body_text, body_font, GRect(4, y, width - 8, 4000),
-        GTextOverflowModeWordWrap, GTextAlignmentLeft);
-
     graphics_context_set_text_color(ctx, GColorBlack);
-    graphics_draw_text(ctx, body_text, body_font, GRect(4, y, width - 8, body_size.h + 4),
+    graphics_draw_text(ctx, body_text, body_font, GRect(4, y, width - 8, body_h + 4),
                        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
-    y += body_size.h + 6;
+    y += body_h + 6;
   }
-}
-
-static int conversation_layout_height(int width) {
-  int y = 0;
-
-  GFont header_font = content_font(true);
-  GFont body_font = content_font(false);
-  GSize sample = graphics_text_layout_get_content_size(
-      "Ag", header_font, GRect(0, 0, width, 100),
-      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  int header_h = sample.h + 4;
-
-  static char body_text[320];
-
-  for (int i = 0; i < conversation_count; i++) {
-    y += header_h;
-
-    conversation_body_text(i, body_text, sizeof(body_text));
-
-    GSize body_size = graphics_text_layout_get_content_size(
-        body_text, body_font, GRect(4, y, width - 8, 4000),
-        GTextOverflowModeWordWrap, GTextAlignmentLeft);
-
-    y += body_size.h + 6;
-  }
-
-  if (y < 1) y = 1;
-  return y;
 }
 
 static void conversation_update(void) {
@@ -351,7 +351,9 @@ static bool outbox_begin(DictionaryIterator **iter) {
   return true;
 }
 
-static void send_message(const char *text) {
+// Send a text message. index >= 0 targets a room by index; -1 targets the
+// currently-open room (the watch leaves ROOM_INDEX off).
+static void send_text(int index, const char *text) {
 
   static char buffer[MAX_SEND_TEXT + 1];
   strncpy(buffer, text, MAX_SEND_TEXT);
@@ -361,23 +363,9 @@ static void send_message(const char *text) {
   if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
-  dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
-
-  app_message_outbox_send();
-
-}
-
-static void send_message_to_index(int index, const char *text) {
-
-  static char buffer[MAX_SEND_TEXT + 1];
-  strncpy(buffer, text, MAX_SEND_TEXT);
-  buffer[MAX_SEND_TEXT] = '\0';
-
-  DictionaryIterator *iter;
-  if (!outbox_begin(&iter)) return;
-
-  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
-  dict_write_int32(iter, MESSAGE_KEY_ROOM_INDEX, index);
+  if (index >= 0) {
+    dict_write_int32(iter, MESSAGE_KEY_ROOM_INDEX, index);
+  }
   dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
 
   app_message_outbox_send();
@@ -472,14 +460,14 @@ static void dictation_callback(
   }
 
   if (pending_room_index >= 0) {
-    send_message_to_index(pending_room_index, transcription);
+    send_text(pending_room_index, transcription);
     pending_room_index = -1;
     return;
   }
 
   // Continuous conversation: send to the open room and show it locally.
   append_conversation("You", (int) time(NULL), transcription);
-  send_message(transcription);
+  send_text(-1, transcription);
 
   conversation_update();
 }

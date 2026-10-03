@@ -1,4 +1,3 @@
-var currentRoom = ''
 var authToken = ''
 
 var ROOM_CACHE_KEY = "matrix_room_cache"
@@ -479,8 +478,30 @@ function getFavourites() {
     return (favourites && favourites.length) ? favourites : [];
 }
 
+// Send items one at a time (100 ms apart) to stay within the AppMessage rate.
+function sendSequential(items, i, sendItem, done) {
+    if (i >= items.length) {
+        if (done) done();
+        return;
+    }
+
+    sendItem(items[i]);
+
+    setTimeout(function() {
+        sendSequential(items, i + 1, sendItem, done);
+    }, 100);
+}
+
 function sendFavouriteItems(favourites, i) {
-    if (i >= favourites.length) {
+    sendSequential(favourites, i, function(favourite) {
+        Pebble.sendAppMessage(
+            {'TYPE': 'FAVOURITE', 'ROOM_NAME': favourite.name || favourite.id},
+            function() {},
+            function(e) {
+                console.log('Issue sending favourite: ', e);
+            }
+        );
+    }, function() {
         Pebble.sendAppMessage(
             {'TYPE': 'FAVOURITES_DONE'},
             function() {},
@@ -488,20 +509,7 @@ function sendFavouriteItems(favourites, i) {
                 console.log('Issue sending favourites done: ', e);
             }
         );
-        return;
-    }
-
-    Pebble.sendAppMessage(
-        {'TYPE': 'FAVOURITE', 'ROOM_NAME': favourites[i].name || favourites[i].id},
-        function() {},
-        function(e) {
-            console.log('Issue sending favourite: ', e);
-        }
-    );
-
-    setTimeout(function() {
-        sendFavouriteItems(favourites, i + 1);
-    }, 100);
+    });
 }
 
 function sendFavourites() {
@@ -549,27 +557,20 @@ function setRoomOrder(rooms, source) {
 }
 
 function sendRoomsSequential(page, i, done) {
-    if (i >= page.length) {
-        if (done) done();
-        return;
-    }
-
-    Pebble.sendAppMessage(
-        {
-            'TYPE': 'ROOMS',
-            'ROOM_NAME': page[i].name,
-            'TIME': Math.floor((page[i].lastTs || 0) / 1000)
-        },
-        function() {
-        },
-        function(e) {
-            console.log('Issue sending room: ', e);
-        }
-    );
-
-    setTimeout(function() {
-        sendRoomsSequential(page, i + 1, done);
-    }, 100);
+    sendSequential(page, i, function(room) {
+        Pebble.sendAppMessage(
+            {
+                'TYPE': 'ROOMS',
+                'ROOM_NAME': room.name,
+                'TIME': Math.floor((room.lastTs || 0) / 1000)
+            },
+            function() {
+            },
+            function(e) {
+                console.log('Issue sending room: ', e);
+            }
+        );
+    }, done);
 }
 
 function sendRoomPage(clear) {
@@ -646,35 +647,28 @@ function loadMoreRooms() {
 }
 
 function sendMessage(messages, i) {
-
     // Newest first so the watch shows the latest message at the top.
     var ids = Object.keys(messages).sort(function(a, b) {
         return b - a;
     });
 
-    if (i >= ids.length) return;
+    sendSequential(ids, i, function(id) {
+        var message = messages[id];
 
-    var id = ids[i];
-    var message = messages[id];
-
-    Pebble.sendAppMessage(
-        {
-            'TYPE': 'MESSAGE',
-            'SENDER': message["sender"] || '(no sender)',
-            'TEXT': message["text"] || '(no content)',
-            'TIME': Math.floor(parseInt(id, 10) / 1000)
-        },
-        function() {
-        },
-        function(e) {
-            console.log('Error sending message ', e);
-        }
-    );
-
-    setTimeout( function() {
-        sendMessage(messages, i+1);
-    }, 100);
-
+        Pebble.sendAppMessage(
+            {
+                'TYPE': 'MESSAGE',
+                'SENDER': message["sender"] || '(no sender)',
+                'TEXT': message["text"] || '(no content)',
+                'TIME': Math.floor(parseInt(id, 10) / 1000)
+            },
+            function() {
+            },
+            function(e) {
+                console.log('Error sending message ', e);
+            }
+        );
+    });
 }
 
 var currentRoomId = '';
@@ -732,7 +726,6 @@ function buildMessages(events, names) {
         }
 
         messages[timeMili] = {
-            'time': new Date(timeMili).toString(),
             'text': content["body"] || 'Error Getting Text',
             'sender': sender
         };
@@ -782,7 +775,6 @@ function openRoom(index) {
     var id = entry.id;
     console.log('Checking messages for ', entry.name);
 
-    currentRoom = entry.name;
     currentRoomId = id;
     currentRoomNames = {};
     roomPrevBatch = null;
