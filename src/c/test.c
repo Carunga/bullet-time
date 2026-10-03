@@ -21,9 +21,6 @@ static MenuLayer *homeLayer;
 static Window *roomsWindow;
 static MenuLayer *roomsLayer;
 
-static Window *messagesWindow;
-static MenuLayer *messagesLayer;
-
 static Window *loadingWindow;
 static TextLayer *loadingTextLayer;
 
@@ -38,15 +35,21 @@ static AppTimer *progressTimer;
 
 char rooms[100][32];
 int roomsCounter = 0;
-
-char messages[12][356];
-char senders[12][128];
-int messagesCounter = 1;
-
-static char view_message[356];
+int room_times[100];
 
 char favourites[20][32];
 int favouritesCounter = 0;
+
+#define CONVERSATION_MAX 6144
+static char conversation[CONVERSATION_MAX];
+static int conversation_len = 0;
+
+static GRect conversation_bounds;
+static bool loading_older = false;
+static bool no_more_messages = false;
+
+static char pending_room[32];
+static bool pending_room_active = false;
 
 int progress = 0;
 
@@ -68,6 +71,10 @@ static void show_latest_messages(void);
 static void send_favourite(int index, const char *text);
 static void start_favourite_dictation(int index);
 static bool outbox_begin(DictionaryIterator **iter);
+static void append_conversation(const char *sender, int epoch_sec, const char *text);
+static void send_message_to_room(const char *room, const char *text);
+static void start_room_dictation(const char *room);
+static void start_current_dictation(void);
 
 static PreferredContentSize s_content_size;
 
@@ -259,6 +266,65 @@ static void send_message(const char *text) {
 
 }
 
+static void send_message_to_room(const char *room, const char *text) {
+
+  static char buffer[MAX_SEND_TEXT + 1];
+  strncpy(buffer, text, MAX_SEND_TEXT);
+  buffer[MAX_SEND_TEXT] = '\0';
+
+  DictionaryIterator *iter;
+  if (!outbox_begin(&iter)) return;
+
+  dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
+  dict_write_cstring(iter, MESSAGE_KEY_ROOM_NAME, room);
+  dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
+
+  app_message_outbox_send();
+
+}
+
+
+// Conversation buffer
+
+static void format_message_time(int epoch_sec, char *out, size_t outlen) {
+  time_t when = (time_t) epoch_sec;
+  struct tm lt = *localtime(&when);
+
+  time_t now = time(NULL);
+  struct tm nt = *localtime(&now);
+
+  if (lt.tm_year == nt.tm_year && lt.tm_yday == nt.tm_yday) {
+    strftime(out, outlen, "%H:%M", &lt);
+  } else {
+    strftime(out, outlen, "%d/%m %H:%M", &lt);
+  }
+}
+
+static void reset_conversation(void) {
+  conversation[0] = '\0';
+  conversation_len = 0;
+  no_more_messages = false;
+  loading_older = false;
+}
+
+static void append_conversation(const char *sender, int epoch_sec, const char *text) {
+  char timebuf[24];
+  format_message_time(epoch_sec, timebuf, sizeof(timebuf));
+
+  int remaining = CONVERSATION_MAX - conversation_len - 1;
+  if (remaining <= 0) return;
+
+  int written = snprintf(conversation + conversation_len, remaining, "%s - %s\n%s\n\n",
+                         sender, timebuf, text);
+  if (written < 0) return;
+
+  if (written >= remaining) {
+    conversation_len = CONVERSATION_MAX - 1;
+  } else {
+    conversation_len += written;
+  }
+}
+
 
 
 
@@ -273,42 +339,31 @@ static void dictation_callback(
   if (status != DictationSessionStatusSuccess) {
     APP_LOG(APP_LOG_LEVEL_INFO, "Dictation cancelled");
     pending_favourite = -1;
+    pending_room_active = false;
     return;
   }
 
   if (pending_favourite >= 0) {
     send_favourite(pending_favourite, transcription);
     pending_favourite = -1;
+    pending_room_active = false;
     return;
   }
 
-  if (messagesCounter < 12) {
-    strncpy(messages[messagesCounter], transcription, 127);
-    messages[messagesCounter][127] = '\0';
-
-    strncpy(senders[messagesCounter], "You", 127);
-    senders[messagesCounter][127] = '\0';
-
-    messagesCounter++;
+  if (pending_room_active) {
+    send_message_to_room(pending_room, transcription);
+    pending_room_active = false;
+    return;
   }
 
+  // Continuous conversation: send to the open room and show it locally.
+  append_conversation("You", (int) time(NULL), transcription);
   send_message(transcription);
 
-  if (messagesLayer) {
-    menu_layer_reload_data(messagesLayer);
+  if (viewBodyTextLayer) {
+    text_layer_set_text(viewBodyTextLayer, conversation);
+    update_scroll_size();
   }
-}
-
-static void load_dictation_message() {
-
-  messagesCounter = 1;
-
-  strncpy(messages[0], "Speech to Text", 127);
-  messages[0][127] = '\0';
-
-  strncpy(senders[0], "Send Message", 127);
-  senders[0][127] = '\0';
-
 }
 
 
@@ -385,6 +440,33 @@ static void start_favourite_dictation(int index) {
   }
 
   pending_favourite = index;
+  pending_room_active = false;
+
+  dictation_session_start(dictationSession);
+}
+
+static void start_room_dictation(const char *room) {
+  if (!dictationSession) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "No dictation session");
+    return;
+  }
+
+  strncpy(pending_room, room, 31);
+  pending_room[31] = '\0';
+  pending_room_active = true;
+  pending_favourite = -1;
+
+  dictation_session_start(dictationSession);
+}
+
+static void start_current_dictation(void) {
+  if (!dictationSession) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "No dictation session");
+    return;
+  }
+
+  pending_favourite = -1;
+  pending_room_active = false;
 
   dictation_session_start(dictationSession);
 }
@@ -409,33 +491,6 @@ static void send_favourite(int index, const char *text) {
 }
 
 
-// Message Select Handlers
-
-static void messages_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-  char *text = messages[cell_index->row];
-
-  if (strcmp(text, "Speech to Text") == 0) {
-    APP_LOG(APP_LOG_LEVEL_INFO, "STARTING DICTATION");
-    if (dictationSession) {
-      pending_favourite = -1;
-      dictation_session_start(dictationSession);
-    }
-  } else {
-    strncpy(view_message, text, 355);
-    view_message[355] = '\0';
-    window_stack_push(viewWindow, true);
-  }
-
-}
-
-static void messages_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
-  menu_cell_basic_draw(ctx, cell_layer, senders[cell_index->row], messages[cell_index->row], NULL);
-}
-
-static uint16_t messages_get_num_rows_callback(MenuLayer *menu_layer, uint16_t section_index, void *context) {
-  return messagesCounter;
-}
-
 // Rooms Select Handlers
 
 static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
@@ -444,19 +499,15 @@ static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, 
     return;
   }
 
-  messagesCounter = 0;
-
-  memset(messages, 0, sizeof(messages));
-  memset(senders, 0, sizeof(senders));
-
-  PBL_IF_MICROPHONE_ELSE(
-    load_dictation_message(),
-    APP_LOG(APP_LOG_LEVEL_ERROR, "No microphone available")
-  );
-
+  reset_conversation();
   get_room_messages(rooms[cell_index->row]);
+  window_stack_push(viewWindow, true);
+}
 
-  window_stack_push(messagesWindow, true);
+static void rooms_select_long_click_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (cell_index->row >= roomsCounter) return;
+
+  start_room_dictation(rooms[cell_index->row]);
 }
 
 static void rooms_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
@@ -465,7 +516,14 @@ static void rooms_draw_row_callback(GContext *ctx, const Layer *cell_layer, Menu
     return;
   }
 
-  menu_cell_basic_draw(ctx, cell_layer, rooms[cell_index->row], NULL, NULL);
+  int epoch = room_times[cell_index->row];
+  if (epoch > 0) {
+    static char timebuf[24];
+    format_message_time(epoch, timebuf, sizeof(timebuf));
+    menu_cell_basic_draw(ctx, cell_layer, rooms[cell_index->row], timebuf, NULL);
+  } else {
+    menu_cell_basic_draw(ctx, cell_layer, rooms[cell_index->row], NULL, NULL);
+  }
 }
 
 static uint16_t rooms_get_num_rows_callback(MenuLayer *menu_layer, uint16_t section_index, void *context) {
@@ -490,10 +548,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     Tuple *room_tuple = dict_find(iterator, MESSAGE_KEY_ROOM_NAME);
     if (!room_tuple) return;
 
+    Tuple *time_tuple = dict_find(iterator, MESSAGE_KEY_TIME);
+
     const char *room = room_tuple->value->cstring;
 
     strncpy(rooms[roomsCounter], room, 31);
     rooms[roomsCounter][31] = '\0';
+    room_times[roomsCounter] = time_tuple ? time_tuple->value->int32 : 0;
     roomsCounter++;
 
     if (roomsLayer) {
@@ -557,33 +618,29 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
     update_loading_text();
   } else if (strcmp(type, "MESSAGE") == 0) {
-    if (messagesCounter >= 12) return;
-
     Tuple *sender_tuple = dict_find(iterator, MESSAGE_KEY_SENDER);
-    if (!sender_tuple) return;
-
-    const char *sender = sender_tuple->value->cstring;
-
     Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_TEXT);
-    if (!text_tuple) return;
+    if (!sender_tuple || !text_tuple) return;
 
-    const char *text = text_tuple->value->cstring;
+    Tuple *time_tuple = dict_find(iterator, MESSAGE_KEY_TIME);
+    int epoch = time_tuple ? time_tuple->value->int32 : (int) time(NULL);
 
-    strncpy(messages[messagesCounter], text, 355);
-    messages[messagesCounter][355] = '\0';
+    append_conversation(sender_tuple->value->cstring, epoch, text_tuple->value->cstring);
+    loading_older = false;
 
-    strncpy(senders[messagesCounter], sender, 127);
-    senders[messagesCounter][127] = '\0';
-    messagesCounter++;
-
-    if (messagesLayer) {
-      menu_layer_reload_data(messagesLayer);
+    if (viewBodyTextLayer) {
+      text_layer_set_text(viewBodyTextLayer, conversation);
+      update_scroll_size();
     }
+  } else if (strcmp(type, "NO_MORE") == 0) {
+    no_more_messages = true;
+    loading_older = false;
   } else if (strcmp(type, "CLEAR_ROOMS") == 0) {
     roomsCounter = 0;
     roomsHasMore = false;
     freshAnimated = false;
     memset(rooms, 0, sizeof(rooms));
+    memset(room_times, 0, sizeof(room_times));
 
     if (roomsLayer) {
       menu_layer_reload_data(roomsLayer);
@@ -682,7 +739,8 @@ static void rooms_window_load(Window *window) {
   menu_layer_set_callbacks(roomsLayer, NULL, (MenuLayerCallbacks) {
     .get_num_rows = rooms_get_num_rows_callback,
     .draw_row = rooms_draw_row_callback,
-    .select_click = rooms_select_callback
+    .select_click = rooms_select_callback,
+    .select_long_click = rooms_select_long_click_callback
   });
 
   menu_layer_set_normal_colors(roomsLayer, GColorWhite, GColorBlack);
@@ -706,39 +764,6 @@ static void rooms_window_unload(Window *window) {
 
   menu_layer_destroy(roomsLayer);
   roomsLayer = NULL;
-  bar_unload();
-}
-
-
-// Messages Window Handlers
-
-static void messages_window_load(Window *window) {
-
-  Layer *windowLayer = window_get_root_layer(window);
-  GRect bounds = reserve_bar_space(windowLayer);
-
-  messagesLayer = menu_layer_create(bounds);
-
-  menu_layer_set_click_config_onto_window(messagesLayer, window);
-
-  menu_layer_set_callbacks(messagesLayer, NULL, (MenuLayerCallbacks) {
-    .get_num_rows = messages_get_num_rows_callback,
-    .draw_row = messages_draw_row_callback,
-    .select_click = messages_select_callback
-  });
-
-  menu_layer_set_normal_colors(messagesLayer, GColorWhite, GColorBlack);
-  menu_layer_set_highlight_colors(messagesLayer, HIGHLIGHT_COLOR, gcolor_legible_over(HIGHLIGHT_COLOR));
-
-  bar_load(window);
-
-  layer_add_child(windowLayer, menu_layer_get_layer(messagesLayer));
-
-}
-
-static void messages_window_unload(Window *window) {
-  menu_layer_destroy(messagesLayer);
-  messagesLayer = NULL;
   bar_unload();
 }
 
@@ -781,23 +806,58 @@ static void loading_window_unload(Window *window) {
   }
 }
 
-// View Window Handlers
+// View Window (continuous conversation) Handlers
+
+static void conversation_select_click(ClickRecognizerRef recognizer, void *context) {
+  start_current_dictation();
+}
+
+static void conversation_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, conversation_select_click);
+}
+
+static void conversation_scroll_handler(ScrollLayer *scroll_layer, void *context) {
+  if (no_more_messages || loading_older) return;
+
+  GSize content = scroll_layer_get_content_size(scroll_layer);
+  GPoint offset = scroll_layer_get_content_offset(scroll_layer);
+
+  int max_offset = content.h - conversation_bounds.size.h;
+  if (max_offset <= 0) return;
+
+  if (offset.y >= max_offset - 4) {
+    DictionaryIterator *iter;
+    if (!outbox_begin(&iter)) return;
+
+    loading_older = true;
+    dict_write_cstring(iter, MESSAGE_KEY_TYPE, "LOAD_OLDER");
+    app_message_outbox_send();
+  }
+}
 
 static void view_window_load(Window *window) {
 
   Layer *windowLayer = window_get_root_layer(window);
   GRect bounds = reserve_bar_space(windowLayer);
 
+  conversation_bounds = bounds;
+
   viewScrollLayer = scroll_layer_create(bounds);
+
+  scroll_layer_set_callbacks(viewScrollLayer, (ScrollLayerCallbacks) {
+    .click_config_provider = conversation_click_config_provider,
+    .content_offset_changed_handler = conversation_scroll_handler
+  });
+
   scroll_layer_set_click_config_onto_window(viewScrollLayer, window);
 
   viewBodyTextLayer = text_layer_create(GRect(5, 20, bounds.size.w - 10, 20000));
-  
+
   text_layer_set_background_color(viewBodyTextLayer, GColorWhite);
-  text_layer_set_text_alignment(viewBodyTextLayer, GTextAlignmentCenter);
+  text_layer_set_text_alignment(viewBodyTextLayer, GTextAlignmentLeft);
   text_layer_set_overflow_mode(viewBodyTextLayer, GTextOverflowModeWordWrap);
   text_layer_set_font(viewBodyTextLayer, content_font(false));
-  text_layer_set_text(viewBodyTextLayer, view_message);
+  text_layer_set_text(viewBodyTextLayer, conversation);
 
   bar_load(window);
 
@@ -830,13 +890,6 @@ static void init() {
     .unload = home_window_unload
   });
 
-  messagesWindow = window_create();
-
-  window_set_window_handlers(messagesWindow, (WindowHandlers) {
-    .load = messages_window_load,
-    .unload = messages_window_unload
-  });
-
   roomsWindow = window_create();
 
   window_set_window_handlers(roomsWindow, (WindowHandlers) {
@@ -859,7 +912,7 @@ static void init() {
   });
 
   dictationSession = dictation_session_create(
-      sizeof(messages[0]),
+      512,
       dictation_callback,
       NULL
   );
@@ -885,7 +938,6 @@ static void init() {
 static void deinit() {
   window_destroy(homeWindow);
   window_destroy(roomsWindow);
-  window_destroy(messagesWindow);
   window_destroy(loadingWindow);
   window_destroy(viewWindow);
 

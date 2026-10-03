@@ -31,7 +31,8 @@
       "HAS_MORE",
       "FROM_CACHE",
       "HAS_CACHE",
-      "FAVOURITE_INDEX"
+      "FAVOURITE_INDEX",
+      "TIME"
     ],
     "resources": {
       "media": [{

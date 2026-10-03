@@ -471,6 +471,13 @@ function matrixSendMessage(message) {
     sendMessageToRoom(room["id"], message);
 }
 
+function sendMessageToRoomByName(roomName, message) {
+    var room = syncData[roomName];
+    if (!room) return;
+
+    sendMessageToRoom(room["id"], message);
+}
+
 // Favourites
 
 var MAX_FAVOURITES = 20;
@@ -557,7 +564,11 @@ function sendRoomsSequential(page, i, done) {
     }
 
     Pebble.sendAppMessage(
-        {'TYPE': 'ROOMS', 'ROOM_NAME': page[i].name},
+        {
+            'TYPE': 'ROOMS',
+            'ROOM_NAME': page[i].name,
+            'TIME': Math.floor((page[i].lastTs || 0) / 1000)
+        },
         function() {
         },
         function(e) {
@@ -660,7 +671,8 @@ function sendMessage(messages, i) {
         {
             'TYPE': 'MESSAGE',
             'SENDER': message["sender"] || '(no sender)',
-            'TEXT': message["text"] || '(no content)'
+            'TEXT': message["text"] || '(no content)',
+            'TIME': Math.floor(parseInt(id, 10) / 1000)
         },
         function() {
         },
@@ -675,21 +687,28 @@ function sendMessage(messages, i) {
 
 }
 
-function getRoomMessages(roomId, callback) {
+var currentRoomId = '';
+var currentRoomNames = {};
+var roomPrevBatch = null;
+
+function getRoomMessages(roomId, from, callback) {
     var hostserver = getHostServer();
     if (!hostserver) {
-        callback([]);
+        callback([], null);
         return;
     }
 
     var url = hostserver + "/_matrix/client/v3/rooms/" +
         encodeURIComponent(roomId) + "/messages?dir=b&limit=20";
+    if (from) {
+        url += "&from=" + encodeURIComponent(from);
+    }
 
     httpRequest("GET", url, { "Authorization": "Bearer " + authToken }, null, 30000,
         function (status, text) {
             if (status < 200 || status >= 300) {
                 console.log("Failed to load messages:", status);
-                callback([]);
+                callback([], null);
                 return;
             }
 
@@ -698,12 +717,38 @@ function getRoomMessages(roomId, callback) {
                 response = JSON.parse(text);
             } catch (err) {
                 console.log("Failed to parse messages", err);
-                callback([]);
+                callback([], null);
                 return;
             }
 
-            callback(response["chunk"] || []);
+            callback(response["chunk"] || [], response["end"] || null);
         });
+}
+
+function buildMessages(events, names) {
+    var messages = {};
+
+    for (var i = 0; i < events.length; i++) {
+        var event = events[i];
+
+        if (event["type"] !== 'm.room.message') continue;
+
+        var content = event["content"] || {};
+        var timeMili = event["origin_server_ts"] || 1000;
+
+        var sender = event["sender"] || null;
+        if (sender) {
+            sender = names[sender] || sender;
+        }
+
+        messages[timeMili] = {
+            'time': new Date(timeMili).toString(),
+            'text': content["body"] || 'Error Getting Text',
+            'sender': sender
+        };
+    }
+
+    return messages;
 }
 
 function getJoinedMembers(roomId, callback) {
@@ -740,12 +785,17 @@ function getJoinedMembers(roomId, callback) {
         });
 }
 
-function sendMessages(room) {
+function openRoom(room) {
     console.log('Checking messages for ', room);
 
     var roomData = syncData[room] || {};
     var id = roomData["id"];
     if (!id) return;
+
+    currentRoom = room;
+    currentRoomId = id;
+    currentRoomNames = {};
+    roomPrevBatch = null;
 
     var pending = 2;
     var events = [];
@@ -755,39 +805,48 @@ function sendMessages(room) {
         pending--;
         if (pending > 0) return;
 
-        var messages = {};
-
-        for (var i = 0; i < events.length; i++) {
-            var event = events[i];
-
-            if (event["type"] !== 'm.room.message') continue;
-
-            var content = event["content"] || {};
-            var timeMili = event["origin_server_ts"] || 1000;
-
-            var sender = event["sender"] || null;
-            if (sender) {
-                sender = names[sender] || sender;
-            }
-
-            messages[timeMili] = {
-                'time': new Date(timeMili).toString(),
-                'text': content["body"] || 'Error Getting Text',
-                'sender': sender
-            };
-        }
-
-        sendMessage(messages, 0);
+        currentRoomNames = names;
+        sendMessage(buildMessages(events, names), 0);
     }
 
-    getRoomMessages(id, function (list) {
+    getRoomMessages(id, null, function (list, end) {
         events = list;
+        roomPrevBatch = end;
         finish();
     });
 
     getJoinedMembers(id, function (map) {
         names = map;
         finish();
+    });
+}
+
+function loadOlder() {
+    if (!currentRoomId) return;
+
+    if (!roomPrevBatch) {
+        Pebble.sendAppMessage(
+            {'TYPE': 'NO_MORE'},
+            function() {},
+            function(e) { console.log('Issue sending no more: ', e); }
+        );
+        return;
+    }
+
+    var from = roomPrevBatch;
+    roomPrevBatch = null;
+
+    getRoomMessages(currentRoomId, from, function (list, end) {
+        roomPrevBatch = end;
+        sendMessage(buildMessages(list, currentRoomNames), 0);
+
+        if (!end) {
+            Pebble.sendAppMessage(
+                {'TYPE': 'NO_MORE'},
+                function() {},
+                function(e) { console.log('Issue sending no more: ', e); }
+            );
+        }
     });
 }
 
@@ -867,12 +926,16 @@ Pebble.addEventListener('appmessage', function(e) {
     var type = e.payload.TYPE;
 
     if (type == 'ROOM_MESSAGES') {
-        var room = e.payload.ROOM_NAME;
-        currentRoom = room;
-        sendMessages(room);
+        openRoom(e.payload.ROOM_NAME);
     } else if (type == 'SEND_MESSAGE') {
         var text = e.payload.TEXT;
-        matrixSendMessage(text);
+        if (e.payload.ROOM_NAME) {
+            sendMessageToRoomByName(e.payload.ROOM_NAME, text);
+        } else {
+            matrixSendMessage(text);
+        }
+    } else if (type == 'LOAD_OLDER') {
+        loadOlder();
     } else if (type == 'LOAD_MORE') {
         loadMoreRooms();
     } else if (type == 'SHOW_CACHE') {
