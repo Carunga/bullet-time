@@ -8,6 +8,9 @@
 // under the legacy AppMessage outbox ceiling.
 #define MAX_SEND_TEXT 200
 
+// List selection highlight, matching the standard notifications/Messages app.
+#define HIGHLIGHT_COLOR PBL_IF_COLOR_ELSE(GColorFolly, GColorBlack)
+
 // Globals
 
 static DictationSession *dictationSession;
@@ -68,16 +71,18 @@ static bool outbox_begin(DictionaryIterator **iter);
 
 static PreferredContentSize s_content_size;
 
+// Match the system notification/MenuCell text sizes per the watch's Text Size
+// setting (GOTHIC_36 isn't available in this SDK, so XL uses 28).
 static GFont content_font(bool bold) {
   switch (s_content_size) {
     case PreferredContentSizeSmall:
-      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_14);
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_18);
     case PreferredContentSizeLarge:
     case PreferredContentSizeExtraLarge:
-      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_24);
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_28);
     case PreferredContentSizeMedium:
     default:
-      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_18);
+      return fonts_get_system_font(bold ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_24);
   }
 }
 
@@ -346,6 +351,9 @@ static void home_window_load(Window *window) {
     .draw_row = home_draw_row_callback,
     .select_click = home_select_callback
   });
+
+  menu_layer_set_normal_colors(homeLayer, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(homeLayer, HIGHLIGHT_COLOR, gcolor_legible_over(HIGHLIGHT_COLOR));
 
   bar_load(window);
 
@@ -677,6 +685,9 @@ static void rooms_window_load(Window *window) {
     .select_click = rooms_select_callback
   });
 
+  menu_layer_set_normal_colors(roomsLayer, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(roomsLayer, HIGHLIGHT_COLOR, gcolor_legible_over(HIGHLIGHT_COLOR));
+
   bar_load(window);
 
   layer_add_child(windowLayer, menu_layer_get_layer(roomsLayer));
@@ -715,6 +726,9 @@ static void messages_window_load(Window *window) {
     .draw_row = messages_draw_row_callback,
     .select_click = messages_select_callback
   });
+
+  menu_layer_set_normal_colors(messagesLayer, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(messagesLayer, HIGHLIGHT_COLOR, gcolor_legible_over(HIGHLIGHT_COLOR));
 
   bar_load(window);
 
