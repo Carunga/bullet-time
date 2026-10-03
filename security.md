@@ -16,8 +16,8 @@ Reviewed: `src/c/test.c`, `src/pkjs/index.js`, `src/pkjs/config.js`,
   malicious/`http` homeserver can capture tokens/passwords.
 - **Watch ⇄ phone AppMessage** is trusted (paired link).
 
-_Status: H1, H2, L2, L3, L6, M1, M2, M3, M4 addressed (branch `security`).
-Open: M5, L1, L4, L5._
+_Status: H1, H2, M1–M4, L1, L2, L3, L4, L6 addressed (branch `security`).
+Accepted: M5 (document in README), L5._
 
 _Decision: the config page stays on the shared `carunga.github.io` origin (no
 own hosting). Accordingly, no secrets are persisted there (see M1/M2/M3); the
@@ -50,22 +50,23 @@ residual risk is documented under "Posture"._
 - [x] **M4 — Wrong-room mis-delivery**: the watch now sends a room **index**
   (`ROOM_INDEX`) instead of a name; the phone resolves it against the ordered
   room list (index → room id), so duplicate names can no longer mis-deliver.
-- [ ] **M5 — No end-to-end encryption**: only `m.room.message` plaintext is
-  handled; encrypted rooms are unreadable and outgoing content is stored
-  plaintext on the homeserver.
-  → Decide stance: refuse encrypted rooms, or document the limitation.
+- [ ] **M5 — No end-to-end encryption** (accepted): only `m.room.message`
+  plaintext is handled; encrypted rooms are unreadable and outgoing content is
+  stored plaintext. To be documented in the README (no code change).
 
 ## Low / hardening
 
-- [ ] **L1** — `webviewclosed` (`index.js:847-858`) blindly trusts the config
-  page's response to rewrite host/token (compounds M1/M2).
+- [x] **L1** — `webviewclosed` now validates the config response before storing
+  it (drops a non-https hostserver, sanitizes favourites to `{id,name}`);
+  it still assumes the config page itself is trusted.
 - [x] **L2** — `getSettings` `JSON.parse` wrapped in try/catch
   (`index.js`); a corrupted entry no longer breaks init.
 - [x] **L3** — `getFragmentParams`/`getQueryParam` use a safe decoder
   (`config.js`); malformed encodings no longer throw.
-- [ ] **L4** — No logout/revocation; tokens persist indefinitely.
-  → Add "Log out" that revokes the token server-side.
-- [ ] **L5** — Config page has no CSP (low; runs in the phone webview).
+- [x] **L4** — "Log out" added to the config page: revokes the token
+  (`POST /_matrix/client/v3/logout`) and returns tokenless settings to PKJS.
+- [ ] **L5** — Config page has no CSP (accepted; low value — only same-origin
+  assets, no inline scripts, runs in the phone webview).
 - [x] **L6** — `save()` only overwrites `access_token` when the new token is
   non-empty (`config.js`).
 

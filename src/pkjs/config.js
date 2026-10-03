@@ -460,6 +460,8 @@ function moveFavourite(index, delta) {
 }
 
 function showSignInHint() {
+    updateAuthUi();
+
     var container = document.getElementById("room-list");
     container.innerHTML = "";
 
@@ -472,6 +474,7 @@ function showSignInHint() {
 }
 
 function showFavourites() {
+    updateAuthUi();
     setStatus("Loading rooms...");
 
     fetchRooms(function (error, rooms) {
@@ -496,6 +499,32 @@ function save() {
     }
     settings.favourites = favourites;
     returnToPebble(settings);
+}
+
+function updateAuthUi() {
+    var el = document.getElementById("logout");
+    if (el) el.hidden = !currentToken;
+}
+
+// Revoke the token server-side, then return tokenless settings to Pebble.
+function logout() {
+    function finish() {
+        returnToPebble({ hostserver: currentHost, favourites: favourites });
+    }
+
+    if (!currentHost || !currentToken) {
+        finish();
+        return;
+    }
+
+    setStatus("Logging out...");
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", currentHost + "/_matrix/client/v3/logout");
+    xhr.setRequestHeader("Authorization", "Bearer " + currentToken);
+    xhr.onload = function () { finish(); };
+    xhr.onerror = function () { finish(); };
+    xhr.send();
 }
 
 // Wiring
@@ -544,6 +573,7 @@ document.getElementById("load-more").addEventListener("click", function () {
 });
 
 document.getElementById("save").addEventListener("click", save);
+document.getElementById("logout").addEventListener("click", logout);
 
 renderFavourites();
 

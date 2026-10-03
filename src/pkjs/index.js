@@ -956,9 +956,29 @@ Pebble.addEventListener("webviewclosed", function(e) {
 
     try {
         var settings = JSON.parse(decodeURIComponent(e.response));
+        if (!settings || typeof settings !== 'object') {
+            console.log("Ignoring invalid settings response");
+            return;
+        }
+
+        // Validate the (untrusted) config response.
+        if (settings.hostserver && !isSecureHost(settings.hostserver)) {
+            console.log("Ignoring non-https hostserver from config");
+            delete settings.hostserver;
+        }
+        if (settings.favourites && !Array.isArray(settings.favourites)) {
+            delete settings.favourites;
+        }
+        if (Array.isArray(settings.favourites)) {
+            settings.favourites = settings.favourites.filter(function (f) {
+                return f && typeof f.id === 'string' && typeof f.name === 'string';
+            });
+        }
+
         localStorage.setItem("matrix_settings", JSON.stringify(settings));
         localStorage.removeItem(ROOM_CACHE_KEY);
         localStorage.removeItem(SYNC_TOKEN_KEY);
+        authToken = '';
         console.log("Settings saved", settings.hostserver, settings.auth,
                     (settings.favourites || []).length);
         init();
