@@ -16,13 +16,15 @@ Reviewed: `src/c/test.c`, `src/pkjs/index.js`, `src/pkjs/config.js`,
   malicious/`http` homeserver can capture tokens/passwords.
 - **Watch ⇄ phone AppMessage** is trusted (paired link).
 
+_Status: H1, H2, L2, L3, L6 addressed (branch `security`). The rest are open._
+
 ## High
 
-- [ ] **H1 — Secrets in logs** (`src/pkjs/index.js:854`):
+- [x] **H1 — Secrets in logs** (`src/pkjs/index.js`):
   `console.log("Settings saved", settings)` logs `access_token`,
   `refresh_token`, and (password auth) `user`/`pass`. Visible via `pebble logs`.
   → Log non-sensitive fields only (host, auth type, favourites count).
-- [ ] **H2 — No HTTPS enforcement** (`src/pkjs/config.js:32-39`,
+- [x] **H2 — No HTTPS enforcement** (`src/pkjs/config.js:32-39`,
   `src/pkjs/index.js:21-26`): `normalizeHost` accepts `http://`, so the bearer
   token and password can be sent in cleartext.
   → Reject non-`https` homeservers in both the config page and PKJS.
@@ -53,15 +55,15 @@ Reviewed: `src/c/test.c`, `src/pkjs/index.js`, `src/pkjs/config.js`,
 
 - [ ] **L1** — `webviewclosed` (`index.js:847-858`) blindly trusts the config
   page's response to rewrite host/token (compounds M1/M2).
-- [ ] **L2** — `getSettings`/`getStoredSettings` `JSON.parse` not wrapped
-  (`index.js:11-15`, `config.js:18-26`); a corrupted entry can break init.
-- [ ] **L3** — `getFragmentParams`/`getQueryParam` (`config.js:47-62`) can
-  throw on malformed encodings. Wrap in try/catch.
+- [x] **L2** — `getSettings` `JSON.parse` wrapped in try/catch
+  (`index.js`); a corrupted entry no longer breaks init.
+- [x] **L3** — `getFragmentParams`/`getQueryParam` use a safe decoder
+  (`config.js`); malformed encodings no longer throw.
 - [ ] **L4** — No logout/revocation; tokens persist indefinitely.
   → Add "Log out" that revokes the token server-side.
 - [ ] **L5** — Config page has no CSP (low; runs in the phone webview).
-- [ ] **L6** — `save()` (`config.js:469-474`) can overwrite a valid token with
-  an empty one.
+- [x] **L6** — `save()` only overwrites `access_token` when the new token is
+  non-empty (`config.js`).
 
 ## C app — memory safety
 

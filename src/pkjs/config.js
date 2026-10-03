@@ -32,9 +32,17 @@ function saveStoredSettings(value) {
 function normalizeHost(host) {
     host = (host || "").trim();
     if (!host) return "";
-    if (!/^https?:\/\//i.test(host)) {
+
+    // Prepend https:// when no scheme is given.
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) {
         host = "https://" + host;
     }
+
+    // Only https homeservers are allowed (never send tokens in cleartext).
+    if (!/^https:\/\//i.test(host)) {
+        return "";
+    }
+
     return host.replace(/\/+$/, "");
 }
 
@@ -44,10 +52,18 @@ function configPageUrl() {
     return origin + window.location.pathname;
 }
 
+function safeDecode(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch (err) {
+        return value;
+    }
+}
+
 function getQueryParam(name) {
     var match = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
     if (!match) return null;
-    return decodeURIComponent(match[1].replace(/\+/g, " "));
+    return safeDecode(match[1].replace(/\+/g, " "));
 }
 
 function getFragmentParams() {
@@ -56,7 +72,7 @@ function getFragmentParams() {
     hash.split("&").forEach(function (pair) {
         if (!pair) return;
         var parts = pair.split("=");
-        params[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1] || "");
+        params[safeDecode(parts[0])] = safeDecode(parts[1] || "");
     });
     return params;
 }
@@ -468,7 +484,9 @@ function showFavourites() {
 
 function save() {
     settings.hostserver = currentHost;
-    settings.access_token = currentToken;
+    if (currentToken) {
+        settings.access_token = currentToken;
+    }
     settings.favourites = favourites;
     returnToPebble(settings);
 }
@@ -486,7 +504,7 @@ passInput.value = settings.pass || "";
 document.getElementById("sso").addEventListener("click", function () {
     var host = normalizeHost(hostInput.value);
     if (!host) {
-        setStatus("Enter your homeserver URL first.", true);
+        setStatus("Enter an https:// homeserver URL.", true);
         return;
     }
     hostInput.value = host;
@@ -498,7 +516,7 @@ document.getElementById("sso").addEventListener("click", function () {
 document.getElementById("save-password").addEventListener("click", function () {
     var host = normalizeHost(hostInput.value);
     if (!host) {
-        setStatus("Enter your homeserver URL first.", true);
+        setStatus("Enter an https:// homeserver URL.", true);
         return;
     }
     hostInput.value = host;
@@ -536,15 +554,25 @@ if (loginToken) {
     }
 } else if (fragment.token && fragment.host) {
     currentHost = normalizeHost(fragment.host);
-    currentToken = fragment.token;
-    settings.hostserver = currentHost;
-    settings.access_token = currentToken;
-    saveStoredSettings(settings);
-    showFavourites();
+    if (!currentHost) {
+        setStatus("This homeserver must use https://.", true);
+        showSignInHint();
+    } else {
+        currentToken = fragment.token;
+        settings.hostserver = currentHost;
+        settings.access_token = currentToken;
+        saveStoredSettings(settings);
+        showFavourites();
+    }
 } else if (settings.access_token && settings.hostserver) {
     currentHost = normalizeHost(settings.hostserver);
-    currentToken = settings.access_token;
-    showFavourites();
+    if (!currentHost) {
+        setStatus("This homeserver must use https://.", true);
+        showSignInHint();
+    } else {
+        currentToken = settings.access_token;
+        showFavourites();
+    }
 } else {
     showSignInHint();
 }

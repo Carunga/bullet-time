@@ -12,17 +12,26 @@ var SYNC_TOKEN_KEY = "matrix_sync_token"
 function getSettings() {
     var s = localStorage.getItem("matrix_settings");
     if (!s) return null;
-    return JSON.parse(s);
+    try {
+        return JSON.parse(s);
+    } catch (err) {
+        return null;
+    }
 }
 
 function saveSettings(settings) {
     localStorage.setItem("matrix_settings", JSON.stringify(settings));
 }
 
+function isSecureHost(hostserver) {
+    return !!hostserver && /^https:\/\//i.test(hostserver);
+}
+
 function getHostServer() {
     var settings = getSettings();
     if (!settings) return null;
     var hostserver = settings['hostserver'];
+    if (!isSecureHost(hostserver)) return null;
     return hostserver;
 }
 
@@ -237,8 +246,8 @@ function login(callback) {
     }
 
     var hostserver = settings['hostserver'];
-    if (!hostserver) {
-        console.log("Missing homeserver");
+    if (!isSecureHost(hostserver)) {
+        console.log("Missing or non-https homeserver");
         callback(null);
         return;
     }
@@ -969,7 +978,8 @@ Pebble.addEventListener("webviewclosed", function(e) {
         localStorage.setItem("matrix_settings", JSON.stringify(settings));
         localStorage.removeItem(ROOM_CACHE_KEY);
         localStorage.removeItem(SYNC_TOKEN_KEY);
-        console.log("Settings saved", settings);
+        console.log("Settings saved", settings.hostserver, settings.auth,
+                    (settings.favourites || []).length);
         init();
     } catch (err) {
         console.log("Failed to parse settings", err);
