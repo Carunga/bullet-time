@@ -16,7 +16,12 @@ Reviewed: `src/c/test.c`, `src/pkjs/index.js`, `src/pkjs/config.js`,
   malicious/`http` homeserver can capture tokens/passwords.
 - **Watch ⇄ phone AppMessage** is trusted (paired link).
 
-_Status: H1, H2, L2, L3, L6, M4 addressed (branch `security`). The rest are open._
+_Status: H1, H2, L2, L3, L6, M1, M2, M3, M4 addressed (branch `security`).
+Open: M5, L1, L4, L5._
+
+_Decision: the config page stays on the shared `carunga.github.io` origin (no
+own hosting). Accordingly, no secrets are persisted there (see M1/M2/M3); the
+residual risk is documented under "Posture"._
 
 ## High
 
@@ -31,17 +36,17 @@ _Status: H1, H2, L2, L3, L6, M4 addressed (branch `security`). The rest are open
 
 ## Medium
 
-- [ ] **M1 — Token in config URL fragment** (`index.js:839-844`,
-  `config.js:53-62,537-543`): the access token is appended to the `openURL`
-  fragment. Fragments aren't sent to servers, but they land in webview history
-  and are readable by any same-origin JS.
-- [ ] **M2 — Credentials on a shared origin** (`config.js:29`, `index.js:18`):
-  settings (access/refresh token, and password for password auth) are stored in
-  `carunga.github.io` `localStorage`, which is shared across all project pages
-  of that account. Any other page there could read them.
-- [ ] **M3 — Plaintext password at rest** (`config.js:157-158`): password auth
-  stores `user`/`pass` in `localStorage` (browser and phone).
-  → Drop the password after obtaining a token; prefer SSO.
+- [x] **M1 — Token in config URL fragment**: the token is still passed in the
+  `openURL` fragment (never sent to a server), but the config page now strips it
+  from the URL/webview history immediately after reading it
+  (`history.replaceState`).
+- [x] **M2 — Credentials on a shared origin**: the config page no longer writes
+  tokens or passwords to `carunga.github.io` `localStorage`; only the homeserver
+  and the favourites list are persisted. Secrets stored by older versions are
+  scrubbed on load.
+- [x] **M3 — Plaintext password at rest**: the config page no longer stores the
+  password; it logs in, keeps the token in memory for the page's lifetime, and
+  returns it to PKJS.
 - [x] **M4 — Wrong-room mis-delivery**: the watch now sends a room **index**
   (`ROOM_INDEX`) instead of a name; the phone resolves it against the ordered
   room list (index → room id), so duplicate names can no longer mis-deliver.
@@ -92,6 +97,23 @@ null-checked. **No memory-safety issues found.** Minor: some tiny
 5. **M4** key rooms by id.
 6. **L2/L3** harden parsing; **L4** add logout/revoke.
 7. **M5** decide E2EE handling.
+
+## Posture / accepted residual risk
+
+Decision: keep the config page on the shared `carunga.github.io` origin (no
+dedicated hosting). Mitigations applied: no secrets are persisted in the
+browser (only homeserver + favourites), the token fragment is removed from
+history, and passwords are not stored.
+
+Accepted residual risks:
+- `carunga.github.io` is shared by all GitHub Pages projects of the account;
+  another same-origin page could read the **non-secret** homeserver URL and
+  favourites list, and could run `localStorage`-based attacks on the config page.
+- The token is briefly present in the config webview URL (fragment) when
+  Settings opens; it is not sent to any server.
+- Whatever code is served at the Pages URL is trusted. A compromised
+  account/repo could use or exfiltrate the token it receives. This is inherent
+  to any hosted web client and cannot be removed without a dedicated origin.
 
 ## Open decisions
 

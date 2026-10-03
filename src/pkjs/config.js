@@ -25,8 +25,13 @@ function getStoredSettings() {
     }
 }
 
+// Only non-sensitive data is persisted on the (shared GitHub Pages) origin.
+// Tokens and passwords are kept in memory only, never written to the browser.
 function saveStoredSettings(value) {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(value));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+        hostserver: value.hostserver || "",
+        favourites: value.favourites || []
+    }));
 }
 
 function normalizeHost(host) {
@@ -92,6 +97,10 @@ function returnToPebble(value) {
 // State
 
 var settings = getStoredSettings();
+
+// Scrub any secrets persisted by older versions on this shared origin.
+saveStoredSettings(settings);
+
 var currentHost = "";
 var currentToken = "";
 var allRooms = [];
@@ -170,8 +179,6 @@ function passwordLogin(host, user, pass) {
         }
 
         settings.auth = "password";
-        settings.user = user;
-        settings.pass = pass;
         setAuth(host, response);
         showFavourites();
     };
@@ -543,6 +550,14 @@ renderFavourites();
 var loginToken = getQueryParam("loginToken");
 var queryHost = getQueryParam("host");
 var fragment = getFragmentParams();
+
+// Don't leave the token fragment in the URL / webview history.
+if (window.location.hash) {
+    try {
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch (e) {
+    }
+}
 
 if (loginToken) {
     var ssoHost = normalizeHost(queryHost || settings.hostserver || "");
