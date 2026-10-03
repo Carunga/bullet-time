@@ -856,6 +856,16 @@ function sendNotConf() {
     );
 }
 
+function sendError(message) {
+    Pebble.sendAppMessage(
+        { 'TYPE': 'ERROR', 'TEXT': message },
+        function() {},
+        function(e) {
+            console.log('Issue sending error: ', e);
+        }
+    );
+}
+
 function sendCacheState() {
     var cached = loadRoomCache();
 
@@ -899,6 +909,7 @@ function syncWithRetry(token, filterId, attempt) {
             }, 2000 * (attempt + 1));
         } else {
             console.log('Sync failed after retries');
+            sendError('Could not load rooms. Check your connection or sign in again.');
         }
     });
 }
@@ -967,10 +978,32 @@ Pebble.addEventListener("webviewclosed", function(e) {
             });
         }
 
-        localStorage.setItem("matrix_settings", JSON.stringify(settings));
-        localStorage.removeItem(ROOM_CACHE_KEY);
-        localStorage.removeItem(SYNC_TOKEN_KEY);
-        authToken = '';
+            // Merge instead of replace: a Save that carries no new token must
+            // not wipe a token stored earlier. Only an explicit Log out clears
+            // credentials.
+            var existing = getSettings() || {};
+            if (settings.loggedOut) {
+                delete existing.access_token;
+                delete existing.refresh_token;
+                delete existing.auth;
+                delete existing.user;
+                delete existing.pass;
+            } else {
+                if (!settings.access_token && existing.access_token) {
+                    settings.access_token = existing.access_token;
+                    if (existing.refresh_token) settings.refresh_token = existing.refresh_token;
+                    if (existing.auth) settings.auth = existing.auth;
+                }
+                if (!settings.user_id && existing.user_id) settings.user_id = existing.user_id;
+                if (!settings.user && existing.user) settings.user = existing.user;
+                if (!settings.pass && existing.pass) settings.pass = existing.pass;
+            }
+            delete settings.loggedOut;
+
+            localStorage.setItem("matrix_settings", JSON.stringify(settings));
+            localStorage.removeItem(ROOM_CACHE_KEY);
+            localStorage.removeItem(SYNC_TOKEN_KEY);
+            authToken = '';
         console.log("Settings saved", settings.hostserver, settings.auth,
                     (settings.favourites || []).length);
         init();

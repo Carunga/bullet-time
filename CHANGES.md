@@ -49,6 +49,19 @@ all of them**.
   address rooms by **index** (fixes wrong-room delivery with duplicate names).
 - Added [security.md](security.md) (review + accepted residual risks).
 
+## `cleanup` — Code cleanup + login robustness
+
+- Removed dead code (unused `FAVOURITE_INDEX` key, `currentRoom`, the message
+  `time` field, unreachable config branches) and de-duplicated helpers.
+- Config page: shared XHR helpers (`request`/`requestJson`); PKJS: a
+  sequential-send helper; watch: one text sender (`send_text`).
+- Cached per-message body heights so the conversation isn't re-measured on
+  every redraw.
+- Signing in now saves the credentials automatically (no need to press Save
+  first), and saving settings no longer wipes an existing token/refresh token;
+  **Log out** still clears them.
+- The watch shows a message if a sync fails instead of hanging on "Loading…".
+
 ## Other
 
 - Added `.gitignore`; removed the committed `build/` artifacts from tracking.

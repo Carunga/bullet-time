@@ -160,7 +160,9 @@ function exchangeLoginToken(host, token) {
 
             settings.auth = "sso";
             setAuth(host, response);
-            showFavourites();
+            // Return to the watch right away so the credentials are saved even
+            // if the user never presses Save.
+            save();
         });
 }
 
@@ -182,7 +184,9 @@ function passwordLogin(host, user, pass) {
 
             settings.auth = "password";
             setAuth(host, response);
-            showFavourites();
+            // Return to the watch right away so the credentials are saved even
+            // if the user never presses Save.
+            save();
         });
 }
 
@@ -493,7 +497,7 @@ function updateAuthUi() {
 // Revoke the token server-side, then return tokenless settings to Pebble.
 function logout() {
     function finish() {
-        returnToPebble({ hostserver: currentHost, favourites: favourites });
+        returnToPebble({ hostserver: currentHost, favourites: favourites, loggedOut: true });
     }
 
     if (!currentHost || !currentToken) {

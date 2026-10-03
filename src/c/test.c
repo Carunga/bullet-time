@@ -750,6 +750,14 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     if (loadingTextLayer) {
       text_layer_set_text(loadingTextLayer, "Open Settings And Sign In With SSO");
     }
+  } else if (strcmp(type, "ERROR") == 0) {
+    Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_TEXT);
+    if (loadingTextLayer && text_tuple) {
+      static char error_text[64];
+      strncpy(error_text, text_tuple->value->cstring, sizeof(error_text) - 1);
+      error_text[sizeof(error_text) - 1] = '\0';
+      text_layer_set_text(loadingTextLayer, error_text);
+    }
   }
   
 }
