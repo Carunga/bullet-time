@@ -1,6 +1,3 @@
-var syncData = {}
-
-
 var currentRoom = ''
 var authToken = ''
 
@@ -55,14 +52,6 @@ function saveRoomCache(rooms) {
     } catch (err) {
         console.log("Failed to cache rooms", err);
     }
-}
-
-function roomsToSyncData(rooms) {
-    var result = {};
-    for (var i = 0; i < rooms.length; i++) {
-        result[rooms[i].name] = rooms[i];
-    }
-    return result;
 }
 
 function loadSyncToken() {
@@ -440,11 +429,10 @@ function getSyncData(token, filterId, callback) {
             });
 
             saveRoomCache(ordered);
-            syncData = roomsToSyncData(ordered);
             setRoomOrder(ordered, 'fresh');
             console.log("Rooms loaded:", ordered.length);
 
-            callback(syncData);
+            callback(ordered);
         });
 }
 
@@ -473,18 +461,12 @@ function sendMessageToRoom(roomId, message) {
         });
 }
 
-function matrixSendMessage(message) {
-    var room = syncData[currentRoom];
-    if (!room) return;
+// Send to the room at a given index in the current (ordered) room list.
+function sendMessageToIndex(index, message) {
+    var entry = roomOrder[index];
+    if (!entry || !entry.id) return;
 
-    sendMessageToRoom(room["id"], message);
-}
-
-function sendMessageToRoomByName(roomName, message) {
-    var room = syncData[roomName];
-    if (!room) return;
-
-    sendMessageToRoom(room["id"], message);
+    sendMessageToRoom(entry.id, message);
 }
 
 // Favourites
@@ -654,7 +636,6 @@ function showCachedRooms() {
     }
 
     console.log('Showing', cached.length, 'cached rooms');
-    syncData = roomsToSyncData(cached);
     setRoomOrder(cached, 'cache');
     sendRoomPage(true);
 }
@@ -794,14 +775,14 @@ function getJoinedMembers(roomId, callback) {
         });
 }
 
-function openRoom(room) {
-    console.log('Checking messages for ', room);
+function openRoom(index) {
+    var entry = roomOrder[index];
+    if (!entry || !entry.id) return;
 
-    var roomData = syncData[room] || {};
-    var id = roomData["id"];
-    if (!id) return;
+    var id = entry.id;
+    console.log('Checking messages for ', entry.name);
 
-    currentRoom = room;
+    currentRoom = entry.name;
     currentRoomId = id;
     currentRoomNames = {};
     roomPrevBatch = null;
@@ -935,13 +916,13 @@ Pebble.addEventListener('appmessage', function(e) {
     var type = e.payload.TYPE;
 
     if (type == 'ROOM_MESSAGES') {
-        openRoom(e.payload.ROOM_NAME);
+        openRoom(e.payload.ROOM_INDEX);
     } else if (type == 'SEND_MESSAGE') {
         var text = e.payload.TEXT;
-        if (e.payload.ROOM_NAME) {
-            sendMessageToRoomByName(e.payload.ROOM_NAME, text);
-        } else {
-            matrixSendMessage(text);
+        if (typeof e.payload.ROOM_INDEX === 'number') {
+            sendMessageToIndex(e.payload.ROOM_INDEX, text);
+        } else if (currentRoomId) {
+            sendMessageToRoom(currentRoomId, text);
         }
     } else if (type == 'LOAD_OLDER') {
         loadOlder();

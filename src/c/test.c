@@ -57,8 +57,7 @@ static GRect conversation_bounds;
 static bool loading_older = false;
 static bool no_more_messages = false;
 
-static char pending_room[32];
-static bool pending_room_active = false;
+static int pending_room_index = -1;
 
 int progress = 0;
 
@@ -81,8 +80,8 @@ static void send_favourite(int index, const char *text);
 static void start_favourite_dictation(int index);
 static bool outbox_begin(DictionaryIterator **iter);
 static void append_conversation(const char *sender, int epoch_sec, const char *text);
-static void send_message_to_room(const char *room, const char *text);
-static void start_room_dictation(const char *room);
+static void send_message_to_index(int index, const char *text);
+static void start_room_dictation(int index);
 static void start_current_dictation(void);
 
 static PreferredContentSize s_content_size;
@@ -320,13 +319,13 @@ static void progress_timer_callback(void *context) {
 
 // Message Functions
 
-static void get_room_messages(const char *room) {
+static void get_room_messages(int index) {
 
   DictionaryIterator *iter;
   if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE,  "ROOM_MESSAGES");
-  dict_write_cstring(iter, MESSAGE_KEY_ROOM_NAME, room);
+  dict_write_int32(iter, MESSAGE_KEY_ROOM_INDEX, index);
 
   app_message_outbox_send();
 
@@ -368,7 +367,7 @@ static void send_message(const char *text) {
 
 }
 
-static void send_message_to_room(const char *room, const char *text) {
+static void send_message_to_index(int index, const char *text) {
 
   static char buffer[MAX_SEND_TEXT + 1];
   strncpy(buffer, text, MAX_SEND_TEXT);
@@ -378,7 +377,7 @@ static void send_message_to_room(const char *room, const char *text) {
   if (!outbox_begin(&iter)) return;
 
   dict_write_cstring(iter, MESSAGE_KEY_TYPE, "SEND_MESSAGE");
-  dict_write_cstring(iter, MESSAGE_KEY_ROOM_NAME, room);
+  dict_write_int32(iter, MESSAGE_KEY_ROOM_INDEX, index);
   dict_write_cstring(iter, MESSAGE_KEY_TEXT, buffer);
 
   app_message_outbox_send();
@@ -461,20 +460,20 @@ static void dictation_callback(
   if (status != DictationSessionStatusSuccess) {
     APP_LOG(APP_LOG_LEVEL_INFO, "Dictation cancelled");
     pending_favourite = -1;
-    pending_room_active = false;
+    pending_room_index = -1;
     return;
   }
 
   if (pending_favourite >= 0) {
     send_favourite(pending_favourite, transcription);
     pending_favourite = -1;
-    pending_room_active = false;
+    pending_room_index = -1;
     return;
   }
 
-  if (pending_room_active) {
-    send_message_to_room(pending_room, transcription);
-    pending_room_active = false;
+  if (pending_room_index >= 0) {
+    send_message_to_index(pending_room_index, transcription);
+    pending_room_index = -1;
     return;
   }
 
@@ -559,20 +558,18 @@ static void start_favourite_dictation(int index) {
   }
 
   pending_favourite = index;
-  pending_room_active = false;
+  pending_room_index = -1;
 
   dictation_session_start(dictationSession);
 }
 
-static void start_room_dictation(const char *room) {
+static void start_room_dictation(int index) {
   if (!dictationSession) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "No dictation session");
     return;
   }
 
-  strncpy(pending_room, room, 31);
-  pending_room[31] = '\0';
-  pending_room_active = true;
+  pending_room_index = index;
   pending_favourite = -1;
 
   dictation_session_start(dictationSession);
@@ -585,7 +582,7 @@ static void start_current_dictation(void) {
   }
 
   pending_favourite = -1;
-  pending_room_active = false;
+  pending_room_index = -1;
 
   dictation_session_start(dictationSession);
 }
@@ -619,14 +616,14 @@ static void rooms_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, 
   }
 
   reset_conversation();
-  get_room_messages(rooms[cell_index->row]);
+  get_room_messages(cell_index->row);
   window_stack_push(viewWindow, true);
 }
 
 static void rooms_select_long_click_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   if (cell_index->row >= roomsCounter) return;
 
-  start_room_dictation(rooms[cell_index->row]);
+  start_room_dictation(cell_index->row);
 }
 
 static void rooms_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {

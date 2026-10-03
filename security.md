@@ -16,7 +16,7 @@ Reviewed: `src/c/test.c`, `src/pkjs/index.js`, `src/pkjs/config.js`,
   malicious/`http` homeserver can capture tokens/passwords.
 - **Watch ⇄ phone AppMessage** is trusted (paired link).
 
-_Status: H1, H2, L2, L3, L6 addressed (branch `security`). The rest are open._
+_Status: H1, H2, L2, L3, L6, M4 addressed (branch `security`). The rest are open._
 
 ## High
 
@@ -42,10 +42,9 @@ _Status: H1, H2, L2, L3, L6 addressed (branch `security`). The rest are open._
 - [ ] **M3 — Plaintext password at rest** (`config.js:157-158`): password auth
   stores `user`/`pass` in `localStorage` (browser and phone).
   → Drop the password after obtaining a token; prefer SSO.
-- [ ] **M4 — Wrong-room mis-delivery** (`index.js:50-56,413-418`): rooms are
-  keyed by **name**; duplicate names collapse, so a message can be sent to the
-  wrong room (privacy). Favourites already use room IDs.
-  → Key by room id (use name only for display).
+- [x] **M4 — Wrong-room mis-delivery**: the watch now sends a room **index**
+  (`ROOM_INDEX`) instead of a name; the phone resolves it against the ordered
+  room list (index → room id), so duplicate names can no longer mis-deliver.
 - [ ] **M5 — No end-to-end encryption**: only `m.room.message` plaintext is
   handled; encrypted rooms are unreadable and outgoing content is stored
   plaintext on the homeserver.
