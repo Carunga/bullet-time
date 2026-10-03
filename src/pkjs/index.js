@@ -5,6 +5,7 @@ var currentRoom = ''
 var authToken = ''
 
 var ROOM_CACHE_KEY = "matrix_room_cache"
+var SYNC_TOKEN_KEY = "matrix_sync_token"
 
 
 // Setting functions
@@ -53,6 +54,48 @@ function roomsToSyncData(rooms) {
         result[rooms[i].name] = rooms[i];
     }
     return result;
+}
+
+function loadSyncToken() {
+    var token = localStorage.getItem(SYNC_TOKEN_KEY);
+    return token || null;
+}
+
+function saveSyncToken(token) {
+    if (token) {
+        localStorage.setItem(SYNC_TOKEN_KEY, token);
+    } else {
+        localStorage.removeItem(SYNC_TOKEN_KEY);
+    }
+}
+
+// Merge a sync response's rooms into the room map. Incremental syncs only
+// carry changed rooms, so unchanged rooms keep their cached name/lastTs.
+function mergeRooms(roomsById, joinedRooms, leaveRooms) {
+    for (var joinedId in joinedRooms) {
+        var data = joinedRooms[joinedId];
+        var room = roomsById[joinedId] || { id: joinedId, name: '(no name)', lastTs: 0 };
+
+        var stateEvents = (data['state'] || {})['events'] || [];
+        for (var i = 0; i < stateEvents.length; i++) {
+            if (stateEvents[i]['type'] === 'm.room.name') {
+                room.name = (stateEvents[i]['content'] || {})['name'] || '(no name)';
+            }
+        }
+
+        var timelineEvents = (data['timeline'] || {})['events'] || [];
+        for (var i = 0; i < timelineEvents.length; i++) {
+            if (timelineEvents[i]['type'] === 'm.room.message') {
+                room.lastTs = timelineEvents[i]['origin_server_ts'] || room.lastTs;
+            }
+        }
+
+        roomsById[joinedId] = room;
+    }
+
+    for (var leftId in leaveRooms) {
+        delete roomsById[leftId];
+    }
 }
 
 
@@ -315,7 +358,19 @@ function getSyncData(token, filterId, callback) {
         return;
     }
 
-    var url = hostserver + "/_matrix/client/v3/sync?timeout=30000";
+    // Reuse the cached room list + sync token for a fast incremental sync.
+    var cached = loadRoomCache();
+    var since = loadSyncToken();
+    if (since && !cached) {
+        since = null;
+        saveSyncToken("");
+    }
+
+    var url = hostserver + "/_matrix/client/v3/sync?";
+    url += since
+        ? "since=" + encodeURIComponent(since) + "&timeout=0"
+        : "timeout=30000";
+
     if (filterId) {
         url += "&filter=" + encodeURIComponent(filterId);
     } else {
@@ -324,7 +379,15 @@ function getSyncData(token, filterId, callback) {
 
     httpRequest("GET", url, { "Authorization": "Bearer " + token }, null, 120000,
         function (status, text) {
-            console.log("Sync status:", status);
+            console.log("Sync status:", status, since ? "(incremental)" : "(full)");
+
+            if ((status < 200 || status >= 300) && since) {
+                // Stale/invalid since token: drop it and do a full sync.
+                console.log("Incremental sync rejected, retrying full");
+                saveSyncToken("");
+                getSyncData(token, filterId, callback);
+                return;
+            }
 
             if (status < 200 || status >= 300) {
                 console.log("Sync failed:", status);
@@ -341,35 +404,26 @@ function getSyncData(token, filterId, callback) {
                 return;
             }
 
-            var ordered = [];
+            if (response["next_batch"]) {
+                saveSyncToken(response["next_batch"]);
+            }
+
             var rooms = response["rooms"] || {};
             var joinedRooms = rooms["join"] || {};
+            var leaveRooms = rooms["leave"] || {};
 
-            for (var roomId in joinedRooms) {
-                var roomData = joinedRooms[roomId];
-
-                var name = '(no name)';
-                var lastTs = 0;
-
-                var stateEvents = (roomData["state"] || {})["events"] || [];
-                for (var i = 0; i < stateEvents.length; i++) {
-                    if (stateEvents[i]["type"] === 'm.room.name') {
-                        name = (stateEvents[i]["content"] || {})["name"] || '(no name)';
-                    }
+            var roomsById = {};
+            if (since && cached) {
+                for (var i = 0; i < cached.length; i++) {
+                    roomsById[cached[i].id] = cached[i];
                 }
+            }
 
-                var timelineEvents = (roomData["timeline"] || {})["events"] || [];
-                for (var i = 0; i < timelineEvents.length; i++) {
-                    if (timelineEvents[i]["type"] === 'm.room.message') {
-                        lastTs = timelineEvents[i]["origin_server_ts"] || 0;
-                    }
-                }
+            mergeRooms(roomsById, joinedRooms, leaveRooms);
 
-                ordered.push({
-                    name: name,
-                    id: roomId,
-                    lastTs: lastTs
-                });
+            var ordered = [];
+            for (var id in roomsById) {
+                ordered.push(roomsById[id]);
             }
 
             ordered.sort(function (a, b) {
@@ -851,6 +905,7 @@ Pebble.addEventListener("webviewclosed", function(e) {
         var settings = JSON.parse(decodeURIComponent(e.response));
         localStorage.setItem("matrix_settings", JSON.stringify(settings));
         localStorage.removeItem(ROOM_CACHE_KEY);
+        localStorage.removeItem(SYNC_TOKEN_KEY);
         console.log("Settings saved", settings);
         init();
     } catch (err) {
