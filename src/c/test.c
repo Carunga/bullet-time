@@ -49,6 +49,7 @@ typedef struct {
   uint16_t header;
   uint16_t body;
   uint16_t body_h;
+  uint8_t color;
 } ConversationEntry;
 
 static ConversationEntry conversation_entries[CONVERSATION_MAX_MESSAGES];
@@ -102,6 +103,52 @@ static GFont content_font(bool bold) {
 }
 
 
+// Background colour for a conversation message header, picked per sender name.
+// Black-and-white watches get a single black bar.
+static GColor name_color(uint8_t index) {
+#if PBL_COLOR
+  switch (index % 8) {
+    case 0: return GColorFolly;
+    case 1: return GColorOrange;
+    case 2: return GColorChromeYellow;
+    case 3: return GColorJaegerGreen;
+    case 4: return GColorCobaltBlue;
+    case 5: return GColorPurple;
+    case 6: return GColorMagenta;
+    default: return GColorTiffanyBlue;
+  }
+#else
+  return GColorBlack;
+#endif
+}
+
+// Assign each distinct sender name the next palette slot (wrapping after 8),
+// so different names get different colours instead of colliding by hash.
+#define NAME_COLOR_SLOTS 8
+static char name_color_names[NAME_COLOR_SLOTS][32];
+static uint8_t name_color_assigned = 0;
+
+static uint8_t name_color_index(const char *name) {
+  uint8_t limit = name_color_assigned < NAME_COLOR_SLOTS
+      ? name_color_assigned : NAME_COLOR_SLOTS;
+
+  for (uint8_t i = 0; i < limit; i++) {
+    if (strncmp(name_color_names[i], name, 31) == 0) return i;
+  }
+
+  uint8_t idx = name_color_assigned % NAME_COLOR_SLOTS;
+  strncpy(name_color_names[idx], name, 31);
+  name_color_names[idx][31] = '\0';
+  if (name_color_assigned < NAME_COLOR_SLOTS) name_color_assigned++;
+  return idx;
+}
+
+static void reset_name_colors(void) {
+  memset(name_color_names, 0, sizeof(name_color_names));
+  name_color_assigned = 0;
+}
+
+
 // Scroll Layer Handler
 
 static int conversation_header_text(int i, char *out, int outsize) {
@@ -126,12 +173,16 @@ static int conversation_body_text(int i, char *out, int outsize) {
   return len;
 }
 
-static int conversation_header_height(int width) {
+static int conversation_header_line_height(int width) {
   GFont header_font = content_font(true);
   GSize sample = graphics_text_layout_get_content_size(
-      "Ag\nAg", header_font, GRect(0, 0, width, 100),
+      "Ag", header_font, GRect(0, 0, width, 100),
       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  return sample.h + 4;
+  return sample.h;
+}
+
+static int conversation_header_height(int width) {
+  return conversation_header_line_height(width) * 2 + 4;
 }
 
 // Measure each body once (stores body_h); conversation_draw reuses the cache.
@@ -166,9 +217,10 @@ static void conversation_draw(Layer *layer, GContext *ctx) {
 
   GFont header_font = content_font(true);
   GFont body_font = content_font(false);
+  int line_h = conversation_header_line_height(width);
   int header_h = conversation_header_height(width);
 
-  static char header_text[64];
+  static char header_text[128];
   static char body_text[320];
 
   for (int i = 0; i < conversation_count; i++) {
@@ -176,11 +228,25 @@ static void conversation_draw(Layer *layer, GContext *ctx) {
 
     conversation_header_text(i, header_text, sizeof(header_text));
 
-    graphics_context_set_fill_color(ctx, HIGHLIGHT_COLOR);
+    // Stored as "sender\ntime": keep the sender to a single ellipsised line
+    // (like the room list) and put the time on the line below it.
+    char *time_text = strchr(header_text, '\n');
+    if (time_text) {
+      *time_text = '\0';
+      time_text++;
+    } else {
+      time_text = "";
+    }
+
+    GColor color = name_color(conversation_entries[i].color);
+
+    graphics_context_set_fill_color(ctx, color);
     graphics_fill_rect(ctx, GRect(0, y, width, header_h), 0, GCornerNone);
 
-    graphics_context_set_text_color(ctx, gcolor_legible_over(HIGHLIGHT_COLOR));
-    graphics_draw_text(ctx, header_text, header_font, GRect(4, y + 2, width - 8, header_h),
+    graphics_context_set_text_color(ctx, gcolor_legible_over(color));
+    graphics_draw_text(ctx, header_text, header_font, GRect(4, y + 2, width - 8, line_h),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, time_text, header_font, GRect(4, y + 2 + line_h, width - 8, line_h),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     y += header_h;
 
@@ -395,6 +461,7 @@ static void reset_conversation(void) {
   conversation_count = 0;
   no_more_messages = false;
   loading_older = false;
+  reset_name_colors();
 }
 
 static void append_conversation(const char *sender, int epoch_sec, const char *text) {
@@ -407,6 +474,7 @@ static void append_conversation(const char *sender, int epoch_sec, const char *t
   if (remaining <= 0) return;
 
   conversation_entries[conversation_count].header = (uint16_t) conversation_len;
+  conversation_entries[conversation_count].color = name_color_index(sender);
 
   int written = snprintf(conversation + conversation_len, remaining, "%s\n%s\n", sender, timebuf);
   if (written < 0) return;
