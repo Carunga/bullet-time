@@ -129,7 +129,7 @@ static int conversation_body_text(int i, char *out, int outsize) {
 static int conversation_header_height(int width) {
   GFont header_font = content_font(true);
   GSize sample = graphics_text_layout_get_content_size(
-      "Ag", header_font, GRect(0, 0, width, 100),
+      "Ag\nAg", header_font, GRect(0, 0, width, 100),
       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   return sample.h + 4;
 }
@@ -408,7 +408,7 @@ static void append_conversation(const char *sender, int epoch_sec, const char *t
 
   conversation_entries[conversation_count].header = (uint16_t) conversation_len;
 
-  int written = snprintf(conversation + conversation_len, remaining, "%s - %s\n", sender, timebuf);
+  int written = snprintf(conversation + conversation_len, remaining, "%s\n%s\n", sender, timebuf);
   if (written < 0) return;
   if (written >= remaining) {
     conversation_len = CONVERSATION_MAX - 1;
